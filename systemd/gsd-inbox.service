@@ -1,0 +1,9 @@
+[Unit]
+Description=gsd Notion inbox: root status page and owner comments (gsd D22, D23)
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/lib/gsd/current/bin/gsd inbox pull --clear --db %h/.local/share/gsd/gsd.sqlite
+UMask=0077
+TimeoutStartSec=20min

@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gsd.brief.v1",
+  "title": "gsd brief ID... --json",
+  "description": "What an item needs next, as gsd holds it, for systems that prepare the owner's work (Steward's prepare job). One entry per requested id, in request order: a full entry, or {id, error} for an unknown or ambiguous id. gsd computes every meaning here; consumers must not re-derive it from gsd's tables, view or export. Times are ISO 8601 with offset; unknown fields are null.",
+  "x-owner": "gsd",
+  "x-consumers": [
+    "steward"
+  ],
+  "type": "object",
+  "required": [
+    "schema",
+    "at",
+    "cut",
+    "items"
+  ],
+  "properties": {
+    "schema": {
+      "const": "gsd.brief.v1"
+    },
+    "at": {
+      "type": "string",
+      "description": "When this answer was read from the live store."
+    },
+    "cut": {
+      "type": "object",
+      "required": [
+        "until",
+        "change_set_id",
+        "committed_at"
+      ],
+      "properties": {
+        "until": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "gsd has reasoned over the owner's evidence up to this time (the same cut as gsd worklist)."
+        },
+        "change_set_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "committed_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The item id, or the query as given when error is set."
+          },
+          "error": {
+            "type": "string",
+            "enum": [
+              "unknown item",
+              "ambiguous item"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Current project name, including inactive projects."
+          },
+          "state": {
+            "type": "string"
+          },
+          "next_actor": {
+            "type": "string"
+          },
+          "due_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stored 0-100 value rendered as a string."
+          },
+          "created_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "gsd's standing summary of the item."
+          },
+          "next_actions": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What gsd holds as the next step, in its words."
+          },
+          "waiting_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The person's name when waiting_on resolves to a current person, else the stored text."
+          },
+          "notion_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "people": {
+            "type": "array",
+            "description": "Current links from this item to people, in graph order.",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "name",
+                "relation"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "relation": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "citations": {
+            "type": "array",
+            "description": "Current source references, in graph order. ref is the qmd event id the evidence came from; read the source through qmd, never from gsd.",
+            "items": {
+              "type": "object",
+              "required": [
+                "ref",
+                "role",
+                "excerpt",
+                "at"
+              ],
+              "properties": {
+                "ref": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "role": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "excerpt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "at": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

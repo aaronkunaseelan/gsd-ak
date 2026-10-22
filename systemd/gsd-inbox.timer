@@ -1,0 +1,9 @@
+[Unit]
+Description=gsd Notion inbox every 15 minutes
+
+[Timer]
+OnCalendar=*:07/15
+Persistent=false
+
+[Install]
+WantedBy=timers.target

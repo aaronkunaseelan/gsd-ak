@@ -1,0 +1,27 @@
+{
+  "email": "owner@example.test",
+  "name": "Pat Synthetic",
+  "organisation": "Example Organisation",
+  "personal_email": "pat@example.test",
+  "whatsapp_jid": "12025550101@s.whatsapp.net",
+  "whatsapp_aliases": [
+    "owner"
+  ],
+  "timezone": "Europe/Helsinki",
+  "backup_remote": "test_remote:example-backups/gsd/",
+  "flow_since": "2026-10-17",
+  "runs_since": "2026-10-17",
+  "notion_import_cutoff": "2026-08-06T00:00:00Z",
+  "keep_from": [
+    "@organisation.test",
+    "@fathom.video",
+    "comments-noreply@docs.google.com"
+  ],
+  "bulk_domains": [
+    "digest.test",
+    "google.com",
+    "retailer.",
+    "x.com"
+  ],
+  "bulk_local": "^(no-?reply|.*-noreply|info|news|alerts?)(\\+.*)?$"
+}

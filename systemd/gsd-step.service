@@ -1,0 +1,11 @@
+[Unit]
+Description=gsd catch-up, projections and backup (not enabled)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/tools/gsd
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/gsd/steady.env
+ExecStart=/usr/bin/python3 -m gsd.steady
+UMask=0077
+TimeoutStartSec=infinity

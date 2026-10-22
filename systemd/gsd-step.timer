@@ -1,0 +1,10 @@
+[Unit]
+Description=gsd hourly steady state (install only after owner review)
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=gsd-step.service
+
+[Install]
+WantedBy=timers.target

@@ -359,6 +359,34 @@ class Tags(unittest.TestCase):
         with self.assertRaises(ValueError):
             tags.validate({'units': [row, row]}, [{'id': 'a'}, {'id': 'b'}], ['p0'])
 
+    def test_captured_style_project_name_keys(self):
+        first = '11111111-1111-4111-8111-111111111111'
+        second = '22222222-2222-4222-8222-222222222222'
+        cards = [{'id': first, 'name': 'Project One'},
+                 {'id': second, 'name': 'Project Two'}]
+        cases = [
+            ('names', cards, {'Project One': 0.9, 'Project Two': 0.7},
+             {first: 0.9, second: 0.7}, 2, 0),
+            ('ambiguous', [cards[0], {**cards[1], 'name': 'Project One'}],
+             {'Project One': 0.9, 'project one': 0.8, 'Project One ': 0.7}, {}, 0, 3),
+            ('ids', cards, {first: 0.9, second: 0.7}, {first: 0.9, second: 0.7}, 0, 0),
+        ]
+        for label, supplied, projects, expected, mapped, unknown in cases:
+            with self.subTest(label=label):
+                reply = {'units': [{'id': 'a', 'projects': projects, 'p_none': 0,
+                                    'p_people_event': 0, 'reason': 'hint'}]}
+                response = SimpleNamespace(returncode=0, stderr='', stdout=json.dumps(
+                    {'result': json.dumps(reply), 'usage': {}}))
+                with patch.object(tags.subprocess, 'run', return_value=response):
+                    rows, calls = tags.haiku(self.root, [unit('a')], supplied)
+                self.assertEqual(rows[0]['projects'], expected)
+                self.assertEqual(rows[0]['name_keys_mapped'], mapped)
+                self.assertEqual(rows[0]['unknown_project_ids'], unknown)
+                self.assertEqual(calls[0]['name_keys_mapped'], mapped)
+                counts = json.loads((self.root / 'result.json').read_text())['tag_counts']
+                self.assertEqual(counts['name_keys_mapped'], mapped)
+                self.assertEqual(counts['unknown_project_ids'], unknown)
+
     def test_malformed_batch_retry_once_usage_and_fixed_prefix(self):
         valid = {
             'units': [

@@ -81,7 +81,7 @@ class Tagging(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     tags.haiku(run, [{'id': 'u', 'kind': 'mail', 'text': 'x'}], [{'id': 'p'}])
             counts = json.loads((run / 'result.json').read_text())['tag_counts']
-            self.assertEqual(counts, {'retries': 1, 'malformed_batches': 2, 'unknown_project_ids': 0})
+            self.assertEqual(counts, {'retries': 1, 'malformed_batches': 2, 'unknown_project_ids': 0, 'name_keys_mapped': 0})
 
 
     def test_steady_tallies_failed_tag_calls(self):
@@ -89,13 +89,14 @@ class Tagging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
             calls = [{'batch': 1, 'attempt': 0, 'malformed': True, 'usage': {}},
-                     {'batch': 1, 'attempt': 1, 'malformed': True, 'usage': {}}]
+                     {'batch': 1, 'attempt': 1, 'malformed': True, 'usage': {}, 'name_keys_mapped': 2}]
             (run / 'tags-calls.json').write_text(json.dumps(calls))
             record = {'counts': dict.fromkeys(('proposed', 'accepted', 'amended', 'rejected', 'held'), 0),
                       'links': [], 'weighted_tokens': 0, 'model_calls': 0}
             steady.tally(record, run)
             self.assertEqual(record['counts']['tags_malformed_batches'], 2)
             self.assertEqual(record['counts']['tags_retries'], 1)
+            self.assertEqual(record['counts']['tags_name_keys_mapped'], 2)
             self.assertIsNone(record['counts']['a_changes'])
 
 

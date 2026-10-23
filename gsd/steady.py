@@ -257,7 +257,8 @@ def run(path):
         'counts': dict.fromkeys(
             ('proposed', 'accepted', 'amended', 'rejected', 'held', 'records_landed',
              'a_undecided', 'a_held', 'measurement_missing',
-             'tags_retries', 'tags_malformed_batches', 'tags_unknown_project_ids')
+             'tags_retries', 'tags_malformed_batches', 'tags_unknown_project_ids',
+             'tags_name_keys_mapped')
             + DECISIONS
             + tuple(prefix + '_' + key for prefix in ('a', 'r1')
                     for key in (*TOKENS, 'weighted_tokens', 'cost_usd')), 0

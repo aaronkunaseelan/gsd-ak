@@ -383,7 +383,8 @@ def make_units(selected):
     return units, dict(aliases)
 
 
-def validate(value, batch, projects):
+def validate(value, batch, projects, project_names=None):
+    project_names = project_names or {}
     rows = value.get('units') if isinstance(value, dict) else None
     if not isinstance(rows, list) or len(rows) != len(batch):
         raise ValueError('wrong unit count')
@@ -394,9 +395,21 @@ def validate(value, batch, projects):
     for row in rows:
         if not isinstance(row.get('projects'), dict):
             raise ValueError('projects must be an object')
-        unknown = set(row['projects']) - set(projects)
-        row['unknown_project_ids'] = len(unknown)
-        row['projects'] = {p: v for p, v in row['projects'].items() if p not in unknown}
+        kept = {}
+        row['unknown_project_ids'] = 0
+        row['name_keys_mapped'] = 0
+        for key, probability in row['projects'].items():
+            if key in projects:
+                kept[key] = probability
+            elif project_names.get(key) is not None:
+                pid = project_names[key]
+                # An explicit id takes precedence if both forms were returned.
+                if pid not in row['projects']:
+                    kept[pid] = probability
+                row['name_keys_mapped'] += 1
+            else:
+                row['unknown_project_ids'] += 1
+        row['projects'] = kept
         for v in [*row['projects'].values(), row.get('p_none'), row.get('p_people_event')]:
             if (
                 isinstance(v, bool)
@@ -415,6 +428,7 @@ def call_counts(calls):
         'retries': sum(c.get('attempt', 0) > 0 for c in calls),
         'malformed_batches': sum(bool(c.get('malformed')) for c in calls),
         'unknown_project_ids': sum(c.get('unknown_project_ids', 0) for c in calls),
+        'name_keys_mapped': sum(c.get('name_keys_mapped', 0) for c in calls),
     }
 
 
@@ -429,7 +443,12 @@ def save_call_counts(run, calls):
 def haiku(run, units, cards):
     prefix = run / 'tags-system.md'
     save(prefix, CONTRACT + json.dumps(cards, ensure_ascii=False))
-    projects, rows, calls = [c['id'] for c in cards], [], []
+    projects, rows, calls = {c['id'] for c in cards}, [], []
+    project_names = {}
+    for card in cards:
+        name = card.get('name')
+        if name is not None:
+            project_names[name] = card['id'] if name not in project_names else None
     for n in range(0, len(units), 25):
         batch = units[n : n + 25]
         prompt = json.dumps(
@@ -497,8 +516,9 @@ def haiku(run, units, cards):
                     if value.startswith('```'):
                         value = value.split('\n', 1)[1].rsplit('```', 1)[0]
                     value = json.loads(value)
-                validated = validate(value, batch, projects)
+                validated = validate(value, batch, projects, project_names)
                 call['unknown_project_ids'] = sum(r['unknown_project_ids'] for r in validated)
+                call['name_keys_mapped'] = sum(r['name_keys_mapped'] for r in validated)
                 rows += validated
                 save_call_counts(run, calls)
                 break

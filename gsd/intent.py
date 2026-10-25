@@ -2,7 +2,6 @@
 
 import json
 import math
-import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -29,7 +28,7 @@ def clip(value, n=160):
 def chain(now, cut):
     hops = []
     try:
-        sources = qmd_status(timeout=1)['sources']
+        sources = qmd_status()['sources']
         for name, label in (
             ('whatsapp', 'qmd · WhatsApp'), ('gmail', 'qmd · Gmail'), ('fathom', 'qmd · Fathom')
         ):
@@ -45,7 +44,7 @@ def chain(now, cut):
                 'complete to ' + store.owner_time(datetime.fromtimestamp(through, UTC), day=False)
             )
             hops.append({'name': label, 'lag_s': lag, 'note': note, 'warn': stale})
-    except (ValueError, OSError, OverflowError, subprocess.TimeoutExpired):
+    except (ValueError, OSError, OverflowError):
         hops = [{'name': 'qmd', 'lag_s': None, 'note': 'unknown: status unreadable or invalid', 'warn': True}]
     hops.append({
         'name': 'gsd cut',

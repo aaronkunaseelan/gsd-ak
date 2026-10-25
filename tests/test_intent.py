@@ -80,7 +80,6 @@ class Intent(unittest.TestCase):
         with patch('gsd.steady.subprocess.run', return_value=reply) as run:
             doc = intent.document(self.path, now)
         self.assertEqual(run.call_args.args[0], ['qmd', 'status', '--json'])
-        self.assertEqual(run.call_args.kwargs['timeout'], 1)
         return doc
 
     def test_fixture_expected_blocks_and_pipeline_cut(self):
@@ -130,6 +129,18 @@ class Intent(unittest.TestCase):
         self.assertEqual(len(days), 31)
         self.assertEqual(days[-1]['day'], '2026-11-16')
 
+    def test_slow_but_valid_qmd_status_reads_current(self):
+        with tempfile.TemporaryDirectory() as bin_dir:
+            fake = Path(bin_dir) / 'qmd'
+            fake.write_text('#!/bin/sh\nsleep 1.5\ncat "$QMD_STATUS_FIXTURE"\n')
+            fake.chmod(0o755)
+            (Path(bin_dir) / 'status.json').write_text(json.dumps(status()))
+            env = {'PATH': bin_dir + os.pathsep + os.environ['PATH'], 'QMD_STATUS_FIXTURE': str(Path(bin_dir) / 'status.json')}
+            with patch.dict(os.environ, env):
+                hops = intent.chain(NOW, None)
+        self.assertNotIn('unknown: status unreadable or invalid', [h['note'] for h in hops])
+        self.assertFalse(any(h['warn'] for h in hops if h['name'].startswith('qmd')))
+
     def test_invalid_or_dead_qmd_is_one_unknown_warn_hop_plus_cut(self):
         for payload in ({}, {**status(), 'schema': 'other'}, {**status(), 'alive': False},
                         {**status(), 'sources': []}):
@@ -145,7 +156,7 @@ class Intent(unittest.TestCase):
                 self.assertEqual(hops[1]['name'], 'gsd cut')
 
     def test_unreadable_or_malformed_qmd_is_unknown(self):
-        for failure in (FileNotFoundError(), subprocess.TimeoutExpired('qmd', 1)):
+        for failure in (FileNotFoundError(), PermissionError()):
             with patch('gsd.steady.subprocess.run', side_effect=failure):
                 hops = intent.chain(NOW, CUT)
             self.assertTrue(hops[0]['warn'])

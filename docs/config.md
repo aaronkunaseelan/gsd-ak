@@ -25,6 +25,7 @@ it explicitly and passes its path to child processes.
 | `timezone` | IANA owner prose/flow timezone | `Europe/Helsinki` |
 | `runs_since` | Default `runs --since` date | `2026-01-01` |
 | `flow_since` | First date of the intent flow | `2026-01-01` |
+| `notion_user_id` | The owner's Notion user id; the step's comment view marks that author `owner` | `00000000-0000-4000-8000-00000000a0a0` |
 | `notion_import_cutoff` | Ignore later edits when reading legacy pages | `2026-01-01T00:00:00Z` |
 
 ## Other files and environment

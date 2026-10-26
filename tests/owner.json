@@ -12,6 +12,7 @@
   "flow_since": "2026-10-17",
   "runs_since": "2026-10-17",
   "notion_import_cutoff": "2026-08-06T00:00:00Z",
+  "notion_user_id": "00000000-0000-4000-8000-00000000a0a0",
   "keep_from": [
     "@organisation.test",
     "@fathom.video",

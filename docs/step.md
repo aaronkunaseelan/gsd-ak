@@ -47,7 +47,7 @@ sections. Each section retains its original parent ref/title, so regrouping cann
 leave an action without a usable citation; only that metadata repeats, not content.
 `tags.json` records source ownership, refs, top two tags at p≥0.06,
 none/people probabilities, cards, model, actual cost and every call's usage/time.
-Weighted tokens = input + 1.25×cache write + 0.1×cache read + 5×output.
+Weighted tokens are `tokens.weighted_tokens`, the unit run records use.
 
 The frozen sparse window groups by top tag in graph order, chronological within
 each group, followed by **No project tagged (read in full)**. Every unit appears

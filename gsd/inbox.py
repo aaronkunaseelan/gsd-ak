@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import db as store
 from . import notion
+from . import owner
 
 # Webhook events (via mech-d) are the primary path; the page-level sweep is the fallback.
 SWEEP = timedelta(hours=24)
@@ -242,9 +243,11 @@ def window(selected, path, since, until):
         for kind, table, column in (('item', 'cur_items', 'title'), ('project', 'cur_projects', 'name'),
                                     ('person', 'cur_people', 'display_name'), ('meeting', 'cur_meetings', 'title')):
             titles.update({r[0]: (kind, r[1]) for r in gdb.execute(f'SELECT id, {column} FROM {table}')})
+    owner_id = owner.get('notion_user_id')
     lines = [
         '# Comments on Notion pages',
-        'Each comment names its recorded Notion author id; page ownership does not establish who wrote it.',
+        "Each comment names its recorded Notion author: 'owner' is the owner's own account (owner.json"
+        " notion_user_id); any other author shows its id. Page ownership does not establish who wrote it.",
         '',
     ]
     for n, row in enumerate(rows, 1):
@@ -253,7 +256,7 @@ def window(selected, path, since, until):
         kind, title = titles.get(record, ('page', ''))
         where = (f'{kind} {record} · {title}' if record else
                  'gsd root page' if root and row['page_id'] == root[0] else f"Notion page {row['page_id']} (not a gsd record)")
-        lines.append(f"[{short}] {row['created_time'][:16]} · author {row['author_id'] or 'unknown'} · {where}{' · on a line' if row['block_id'] else ''}")
+        lines.append(f"[{short}] {row['created_time'][:16]} · author {'owner' if row['author_id'] == owner_id else row['author_id'] or 'unknown'} · {where}{' · on a line' if row['block_id'] else ''}")
         lines.append('  ' + ' '.join(row['text'].split()))
         selected['refs'][short] = 'notion-comment:' + row['id']
     selected['views']['comments.md'] = '\n'.join(lines)

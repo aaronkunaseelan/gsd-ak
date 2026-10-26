@@ -146,8 +146,8 @@ The rationale and superseded experiments are in [docs/decisions.md](docs/decisio
 - [gsd](https://github.com/aaronkunaseelan/gsd-ak) decides **what**: the work graph,
   evidence-backed changes and the read contracts above.
 - [Steward](https://github.com/aaronkunaseelan/steward) decides **when**: owner time
-  and compute time. It reads `gsd.worklist.v1`, `gsd.brief.v1`, `gsd.closures.v1`
-  and `gsd.runs.v1`; it never writes gsd.
+  and compute time. It reads `gsd.worklist.v1`, `gsd.closures.v1` and `gsd.runs.v1`;
+  it never writes gsd.
 - [tg-tools](https://github.com/aaronkunaseelan/tg-tools) delivers over Telegram;
   it is not the work graph or its scheduler.
 

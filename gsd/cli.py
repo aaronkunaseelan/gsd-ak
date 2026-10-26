@@ -7,7 +7,7 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
-from . import db as store, read, write, draft
+from . import db as store, read, write, draft, owner
 
 
 def stdin_json(required=True):
@@ -47,8 +47,9 @@ def do_migrate(a):
     with sqlite3.connect(path) as db:
         db.row_factory = sqlite3.Row
         folded = store.migrate(db)
+        version = db.execute('PRAGMA user_version').fetchone()[0]
     os.chmod(path, 0o600)
-    return {'schema_version': 4, 'db': str(path), 'folded': folded}
+    return {'schema_version': version, 'db': str(path), 'folded': folded}
 
 
 def do_read(a):
@@ -77,6 +78,19 @@ def do_contract(a):
     if not re.fullmatch(r'gsd\.[a-z]+\.v[0-9]+', a.id) or not path.is_file():
         raise ValueError('unknown contract id')
     return path.read_text()
+
+
+def do_rules(a):
+    from . import packets
+    first = owner.get('name').split()[0]
+    rules = [
+        {'n': n, 'name': p['name'], 'decision': p['decision'],
+         'text': p['text'].replace('{first_name}', first)}
+        for n, p in enumerate(packets.PRINCIPLES, 1)
+    ]
+    if a.json:
+        return rules
+    return packets.principles_text(first) + '\n'
 
 
 def do_write(a):
@@ -200,7 +214,7 @@ VERBS = [
             (['--effort-a'], {'choices': ['low', 'medium', 'high'], 'default': 'medium'}),
             (['--effort-review'], {'choices': ['low', 'medium', 'high'], 'default': 'medium'}),
         ],
-        'effect': 'Select/capture a private QMD window, snapshot, propose, review sequentially, commit and export. --restate skips selection and re-states each active project from its own sources, then one deep reviewer. --tags (default) calls Haiku even with --dry, groups the window and uses cluster/people/meetings review. --no-tags preserves the old window/review path. --effort-a sets the proposer effort; --effort-review sets the effort of every reviewer. --dry launches no proposer or reviewer.',
+        'effect': 'Select/capture a private QMD window, snapshot, propose, review sequentially, commit and export. --restate skips selection and re-states each active project from its own sources, then runs the same review relay. --tags (default) calls Haiku even with --dry and groups the window by project; --no-tags keeps the ungrouped window. Every mode shares one review plan. --effort-a sets the proposer effort; --effort-review sets the effort of every reviewer. --dry launches no proposer or reviewer.',
         'example': 'gsd step --since 2026-08-13 --until 2026-08-17 --db scratch.sqlite --dry',
         'handler': lambda a: __import__('gsd.step', fromlist=['run']).run(a),
     },
@@ -238,6 +252,13 @@ VERBS = [
         'effect': 'Print a shipped contract by ID (no database required).',
         'example': 'gsd contract gsd.worklist.v1',
         'handler': do_contract,
+    },
+    {
+        'name': 'rules',
+        'arguments': [],
+        'effect': 'The judgement principles every agent writing the graph follows, numbered as in the pipeline contract (no database required).',
+        'example': 'gsd rules --json',
+        'handler': do_rules,
     },
     {
         'name': 'export',
@@ -295,7 +316,7 @@ VERBS = [
     {
         'name': 'migrate',
         'arguments': [],
-        'effect': 'Idempotently create/migrate schema v3 (the only DDL path).',
+        'effect': 'Idempotently create or migrate the schema to its current version (the only DDL path).',
         'example': 'gsd migrate --db scratch.sqlite',
         'handler': do_migrate,
     },

@@ -154,6 +154,7 @@ class CLI(unittest.TestCase):
                 'show',
                 'brief',
                 'closures',
+                'rules',
                 'fields',
                 'verbs',
                 'upsert',

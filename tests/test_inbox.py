@@ -17,9 +17,10 @@ from gsd import db, inbox, intent, notion, status_page, write
 NOW = datetime(2026, 10, 18, 14, 0, tzinfo=UTC)
 
 
-def comment(cid, page=None, block=None, text='note', edited='2026-10-18T13:00:00.000Z'):
+def comment(cid, page=None, block=None, text='note', edited='2026-10-18T13:00:00.000Z',
+            author='00000000-0000-4000-8000-00000000a0a0'):
     parent = {'type': 'block_id', 'block_id': block} if block else {'type': 'page_id', 'page_id': page}
-    return {'id': cid, 'discussion_id': 'd-' + cid, 'parent': parent, 'created_by': {'id': 'owner'},
+    return {'id': cid, 'discussion_id': 'd-' + cid, 'parent': parent, 'created_by': {'id': author},
             'created_time': '2026-10-18T12:59:00.000Z', 'last_edited_time': edited,
             'rich_text': [{'plain_text': text}]}
 
@@ -162,15 +163,19 @@ class Inbox(unittest.TestCase):
         self.assertIn('## Your comments', patches[0]['update_content']['content_updates'][0]['new_str'])
 
     def test_window_gives_a_step_the_comments_first_seen_inside_it(self):
-        self.client.comments = {'p1': [comment('c2', block='b1', text='Due Friday,\n not Monday')]}
+        self.client.comments = {'p1': [comment('c2', block='b1', text='Due Friday,\n not Monday'),
+                                       comment('c3', block='b1', text='Agreed', author='someone-else')]}
         self.read()
         selected = {'refs': {}, 'views': {}, 'manifest': {}}
         seen = self.comments()['c2']['seen_at']
         inbox.window(selected, self.path, '2026-10-18T00:00:00.000000Z', seen)
-        self.assertEqual(selected['comments'], 1)
-        self.assertEqual(selected['refs'], {'nc1': 'notion-comment:c2'})
+        self.assertEqual(selected['comments'], 2)
+        self.assertEqual(selected['refs'], {'nc1': 'notion-comment:c2', 'nc2': 'notion-comment:c3'})
         self.assertIn(f'item {self.item} · Synthetic task · on a line', selected['views']['comments.md'])
         self.assertIn('Due Friday, not Monday', selected['views']['comments.md'])
+        view = selected['views']['comments.md']
+        self.assertIn('· author owner · item', view)
+        self.assertIn('· author someone-else · item', view)
         later = {'refs': {}, 'views': {}, 'manifest': {}}
         inbox.window(later, self.path, seen, '2026-10-19T00:00:00.000000Z')
         self.assertNotIn('comments', later)

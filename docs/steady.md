@@ -94,7 +94,7 @@ success), `bounded_by`, per-source `fresh_through`, `kind: gsd-steady`, initial
 in order). An empty piece sets `empty_reason` even if other pieces land changes.
 The until field is the planned bound, not a substitute for the committed cursor.
 
-Weighted tokens sum input + output + 1.25 × cache-write + 0.1 × cache-read over
+Weighted tokens (`tokens.weighted_tokens`) are summed over
 Claude call captures, including Haiku tagging attempts; `model_calls` counts
 those calls. The producer's schema is vendored at
 `contracts/vendor/steward.record.v1.json`; tests use these same vendored files
@@ -152,7 +152,7 @@ people's items with `at <= due_at <= at + 2 days`; overdue work and agents
 are excluded.
 Both lists carry id, title, current project name (or null), due_at and priority.
 The intent view's "you" counts read this same definition (D29).
-States describe progress only: inbox, ready, running, blocked, done, canceled.
+States describe progress only; `gsd fields` lists them.
 `next_actor` independently names who moves next. `gsd migrate` first takes a
 private `VACUUM INTO` backup (`backups/pre-d29-*.sqlite`), then appends ready
 versions for current legacy awaiting states, preserving next_actor and history.

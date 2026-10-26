@@ -271,6 +271,52 @@ refusal rolls back records, cut and feed positions; the next run replays against
 the current graph. Deliberate reviewer holds/rejections remain decisions, not
 refusals. Manual drafts without a source feed keep partial-commit semantics.
 
+## D31. One open item per outcome
+
+An item's single next actor, waiting-on and due date can show one step, so they
+carry the critical path to the outcome's next milestone. Later steps and helpers
+update that item rather than becoming items, which keeps an owner's pipeline
+reviewable as one row per outcome. A second item is justified only by a blocker
+that independently holds the same milestone and has its own owner and date, so
+reviews can chase it; it folds back when cleared. Supporting steps that go quiet
+surface only by reading the item, an accepted cost of the smaller list.
+
+Lives in: `packets.PRINCIPLES` (`one-outcome`), printed by `gsd rules`.
+
+## D32. One owner per fact; prose explains and points
+
+A value written in two places drifts. By 26 October the docs carried a wrong
+weighted-token formula, a stale schema version and a retired review shape, and
+the judgement principles existed in four hand-kept copies. Each fact therefore
+has one owner in code, the schema or a shipped contract; the CLI prints it; prose
+gives reasons and names where the fact lives, never its value. Judgement
+principles are prose too, but held once and rendered into every prompt that
+needs them. A copy that cannot be avoided (prompt text, a vendored contract) is
+generated or checked by a test, so drift fails the suite instead of waiting for
+a reader to notice. This adopts Steward's rule (owner X-19.9: code holds every
+value it uses; prose holds judgement and the owner's words), so the family
+follows one rule.
+
+Lives in: AGENTS.md (placement table and change checklist);
+`tests/test_single_source.py`.
+
+## D33. Ten named principles, each one rule with its reason
+
+The principles are rewritten from their evidence (exp4–exp7 failure modes,
+D14, D19, D25, D31) and from how live runs cite them. Each now holds one rule.
+Assignment quotes join closure under the decider, because both are about who
+may decide; people records and privacy separate, because recording risk and
+withholding private detail pull in opposite directions. Privacy moves out of the
+pipeline-only header so agents writing by hand see it too. The recruitment case
+("applicant volume") becomes the general rule that people records follow roles.
+Two rules become explicit: a field needing two inference steps stays unchanged,
+and a confirmed address or number is added to the person's aliases rather than
+inferred again. Agents cite principles by name, since numbers shift whenever
+the list changes. Mechanics the store enforces are named with the reason, not
+re-specified; its refusal messages say what to do.
+
+Lives in: `packets.PRINCIPLES`, printed by `gsd rules`.
+
 ## Cross-system contracts
 
 The producer owns specific views; generic consumers own generic input formats.
@@ -280,7 +326,7 @@ an empty healthy list. Additive keys keep a version; renamed, removed or
 redefined fields require a new version, promoted producer-first with overlap.
 
 qmd owns data, gsd owns what, and Steward owns when. Steward reads
-`gsd.worklist.v1`, `gsd.brief.v1`, `gsd.closures.v1` and `gsd.runs.v1`, never gsd's
+`gsd.worklist.v1`, `gsd.closures.v1` and `gsd.runs.v1`, never gsd's
 store or experimental export, and never writes gsd. Run receipts and projection
 outputs name their readers and origins. These boundaries prevent two systems
 from independently defining the same meaning.

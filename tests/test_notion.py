@@ -280,13 +280,6 @@ class SectionMarkerTests(unittest.TestCase):
         self.assertIn('### Internal title', body)
         self.assertIn('## Fenced', body)
 
-    def test_trailing_page_divider_is_attributable_but_owner_text_after_it_is_not(self):
-        sections = {'Summary': 'S', 'gsd id': 'abc'}
-        body = notion.markdown(sections)
-        self.assertEqual(notion.section_ambiguities(notion.section_ranges(body + '\n\n---'), sections), [])
-        owned = notion.section_ranges(body + '\n\n---\n\nOwner block')
-        self.assertEqual(notion.section_ambiguities(owned, sections), ['gsd id'])
-
     def test_discussion_wrappers_and_duplicate_normalisation(self):
         wrapped = '## <span discussion-urls="https://notion.so/discussion">Summary</span>'
         ranges = notion.section_ranges(wrapped + '\nOld\n\n## Summary\nNew')
@@ -1184,20 +1177,17 @@ raise SystemExit(cli.main())
         self.assertTrue(self.fake.bodies[page].endswith(unrelated))
         self.assertEqual(self.fake.comments, before_comments)
         self.assertIn('### Nested heading', self.fake.bodies[page])
-        # Legacy/missing marker fallback is append-only for that section.
+        # D34: a section is rewritten from gsd's render even when text below an
+        # interior divider is not gsd's; a lost marker is appended again.
         self.fake.bodies[page] = self.fake.bodies[page].replace(
             '## Sources\n\n_(empty)_', 'Legacy source block'
         )
         self.change('project', rid, {'summary': 'Third'})
-        before_body = self.fake.bodies[page]
         report = self.publish()
-        self.assertEqual(report['appended_sections'], [])
-        self.assertIn('body unchanged', report['pages'][0]['errors'][0])
-        self.assertEqual(self.fake.bodies[page], before_body)
-        self.assertIsNone(self.mappings()[rid]['content_hash'])
-        checked = self.publish(check=True)
-        self.assertEqual(checked['ambiguous_sections'], [{'page_id': page, 'sections': ['Linked items']}])
-        self.assertIn('Legacy source block', self.fake.bodies[page])
+        self.assertEqual(report['pages'][0]['errors'], [])
+        self.assertNotIn('Legacy source block', self.fake.bodies[page])
+        self.assertEqual(len(notion.section_ranges(self.fake.bodies[page])['Sources']), 1)
+        self.assertIsNotNone(self.mappings()[rid]['content_hash'])
         self.assertIn(unrelated, self.fake.bodies[page])
         self.assertTrue(notion.probe_comments(self.fake.client, page)['survived'])
 
@@ -1237,13 +1227,11 @@ raise SystemExit(cli.main())
         self.publish()
         page = self.mappings()[rid]['page_id']
         self.assertEqual(self.fake.bodies[page].count('Unique ending'), 2)
-        before = self.fake.bodies[page]
         self.change('project', rid, {'summary': text + ' updated'})
         report = self.publish()
-        self.assertIn('body unchanged', report['pages'][0]['errors'][0])
-        self.assertEqual(self.fake.bodies[page], before)
+        self.assertEqual(report['pages'][0]['errors'], [])
+        self.assertEqual(self.fake.bodies[page].count('Unique ending updated'), 1)
         self.assertEqual(self.fake.bodies[page].count('Unique ending'), 2)
-        self.assertIn(text, self.fake.bodies[page])
 
     def test_date_readback_compares_range_end_and_timezone(self):
         expected = {'Due': notion.encode('date', '2026-10-28')}

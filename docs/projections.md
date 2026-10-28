@@ -120,11 +120,8 @@ PATCH /v1/pages/{id}/markdown
 ```
 
 Headings are section markers; duplicate markers or incomplete markdown fail closed.
-An interior divider in a section whose content differs from its desired canonical
-rendering is ambiguous: it might hide an unheaded owner block or a missing marker.
-The entire page body stays unchanged and its completion hashes stay null; page
-errors and `--check`'s `ambiguous_sections` findings name the sections. Exact
-canonical sections with legitimate internal dividers round-trip unchanged.
+A mapped section is rewritten from gsd's render whatever its live text holds,
+interior dividers included (D34): owner input arrives as comments, not body text.
 Missing sections are appended using `insert_content` at the end and listed in
 `appended_sections` (also predicted by a token-backed check). Unrelated headings,
 blocks and managed child databases are not replaced. Emptying previously rendered

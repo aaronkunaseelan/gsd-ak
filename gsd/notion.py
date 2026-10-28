@@ -644,26 +644,6 @@ def section_ranges(body):
     return result
 
 
-def section_ambiguities(ranges, sections):
-    """An internal divider can also hide a missing marker or unheaded owner block.
-
-    Exact canonical content is attributable. Otherwise, without historical body
-    state, choosing which side of that divider to overwrite would be guessing.
-    A divider with nothing after it hides nothing.
-    """
-    ambiguous = []
-    for heading, value in sections.items():
-        entries = ranges.get(heading, [])
-        if len(entries) != 1:
-            continue
-        old = entries[0]
-        new = old.split('\n', 1)[0] + '\n' + markdown({heading: value}).partition('\n')[2]
-        if old != new and any(outside and line.strip() == '---' and old[offset + len(line):].strip()
-                              for offset, line, outside in markdown_lines(old)):
-            ambiguous.append(heading)
-    return ambiguous
-
-
 def markdown_warnings(response, errors):
     for warning in response.get('warnings', []):
         errors.append('notion warning: ' + warning['code'])
@@ -681,10 +661,6 @@ def update_body(client, page, sections, *, errors=None):
     for heading in sections:
         if len(ranges.get(heading, [])) > 1:
             raise ValueError('ambiguous Notion section marker: ' + heading)
-    ambiguous = section_ambiguities(ranges, sections)
-    if ambiguous:
-        errors.append('unattributed Notion section content: ' + ', '.join(ambiguous) + '; body unchanged')
-        return []
     missing = []
     for heading, value in sections.items():
         old = ranges.get(heading, [])
@@ -1302,8 +1278,7 @@ def projection_summary(report):
     classes = {name: report[name] for name in (
         'property_differences', 'duplicate_sections', 'unmapped_pages',
         'missing_pages', 'wrong_source_pages', 'trashed_pages',
-        'unreachable_pages', 'appended_sections', 'source_differences', 'pending_archives',
-        'ambiguous_sections')}
+        'unreachable_pages', 'appended_sections', 'source_differences', 'pending_archives')}
     classes['schema_differences'] = [
         {'page_id': table} for table, diff in report['schema_differences'].items()
         if diff['extra'] or diff['missing_or_wrong_type']]
@@ -1369,8 +1344,7 @@ def reconcile(client, report, rendered, mapped, schemas, sources):
         rendered_by_id = {r['record_id']: r for r in rendered}
         ids = {rid: old['page_id'] for rid, old in mapped.items() if old['page_id']}
         for name in ('property_differences', 'duplicate_sections', 'unmapped_pages',
-                     'missing_pages', 'wrong_source_pages', 'trashed_pages', 'pending_archives',
-                     'ambiguous_sections'):
+                     'missing_pages', 'wrong_source_pages', 'trashed_pages', 'pending_archives'):
             report[name] = []
         report['missing_pages'] = [
             {'record_id': rid, 'page_id': None, 'why': 'no mapped page'}
@@ -1428,9 +1402,6 @@ def reconcile(client, report, rendered, mapped, schemas, sources):
                                                            'properties': different,
                                                            'errors': errors + relation_errors})
                 ranges = section_ranges(client.body(page))
-                ambiguous = section_ambiguities(ranges, row['sections'])
-                if ambiguous:
-                    report['ambiguous_sections'].append({'page_id': page, 'sections': ambiguous})
                 duplicates = [heading for heading, entries in ranges.items() if len(entries) > 1]
                 if duplicates:
                     report['duplicate_sections'].append({'page_id': page, 'sections': duplicates})

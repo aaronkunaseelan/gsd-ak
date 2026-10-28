@@ -285,7 +285,7 @@ class FeedTests(unittest.TestCase):
             db.executescript('DROP TABLE feed_positions; PRAGMA user_version=3;')
             store.migrate(db)
             store.migrate(db)
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 5)
         backups = list((self.root / 'backups').glob('pre-feed-*.sqlite'))
         self.assertEqual(len(backups), 1)
         with store.connect(backups[0]) as db:

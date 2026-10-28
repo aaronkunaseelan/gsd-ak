@@ -121,13 +121,26 @@ class Intent(unittest.TestCase):
         self.assertEqual(doc['blocks'][0]['others'], 1)
         self.assertTrue(all(r['you'] == 0 for r in doc['blocks'][2]['items']))
 
+    def test_flow_uses_newest_31_dates_and_retains_earlier_stock(self):
+        now = NOW + timedelta(days=90)
+        flow = self.document(now=now)['blocks'][1]
+        self.assertEqual(flow['days'][-1]['day'], now.date().isoformat())
+        self.assertEqual(flow['since'], flow['days'][0]['day'])
+        self.assertEqual(len(flow['days']), 31)
+        self.assertEqual(flow['days'][0]['day'], (now - timedelta(days=30)).date().isoformat())
+        self.assertTrue(all(day['open'] == 5 and day['in'] == day['out'] == 0
+                            for day in flow['days']))
+        # A later view never truncates the graph's historical transitions.
+        original = self.document()['blocks'][1]
+        self.assertEqual(original['days'], [{'day': '2026-10-17', 'open': 5, 'in': 2, 'out': 0}])
+
     def test_flow_athens_boundary_and_31_day_cap(self):
         self.assertEqual(self.document(now=datetime(2026, 10, 16, 20, 59, tzinfo=UTC))['blocks'][1]['days'], [])
         first = self.document(now=datetime(2026, 10, 16, 21, tzinfo=UTC))['blocks'][1]['days']
         self.assertEqual(len(first), 1)
         days = self.document(now=NOW + timedelta(days=90))['blocks'][1]['days']
         self.assertEqual(len(days), 31)
-        self.assertEqual(days[-1]['day'], '2026-11-16')
+        self.assertEqual(days[-1]['day'], '2027-01-15')
 
     def test_slow_but_valid_qmd_status_reads_current(self):
         with tempfile.TemporaryDirectory() as bin_dir:

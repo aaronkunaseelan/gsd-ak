@@ -86,7 +86,7 @@ else:
         self.executable('rclone', (ROOT / 'tests/fake_rclone.py').read_text())
         self.executable(
             'gsd',
-            '''import json, os, pathlib, sys, uuid
+            '''import json, os, pathlib, sys, time, uuid
 from gsd import db as store, draft, write, export
 args = sys.argv[1:]
 with open(os.environ['FAKE_LOG'], 'a') as out:
@@ -101,6 +101,11 @@ if args[0] != 'step':
     if args[:2] == ['publish', 'notion']:
         mode = os.environ.get('FAKE_MODE')
         report = {'pages': [], 'published': 0}
+        if '--check' in args:
+            from gsd.notion import publish_log
+            time.sleep(float(os.environ.get('FAKE_CHECK_DELAY', '0')))
+            publish_log(os.environ['GSD_DB'], {'requests': {}, 'plan': {},
+                'projection_check': {'known': True, 'classes': {}}})
         if mode == 'notion-refused':
             report['refused'] = 'PRIVATE SCHEMA DETAILS'
         elif mode == 'notion-incomplete':
@@ -276,6 +281,7 @@ commit = commit_draft(d, 'gsd-step-run:')
         self.assertNotIn('context_mode', result)
         self.assertIn('a_changes', result['counts'])
         self.assertIn('r1_added', result['counts'])
+        self.assertEqual(result['notion'], 'skipped (missing notion.token, notion-check-reviewed)')
         self.assertEqual(result['counts']['tags_retries'], 0)
         self.assertGreaterEqual(result['minutes'], 0)
         self.assertEqual(result['published'], ['archive', 'publish qmd', 'backup'])
@@ -287,6 +293,29 @@ commit = commit_draft(d, 'gsd-step-run:')
         self.assertNotIn('--a', step)
         self.assertEqual(steady.cursor(self.db), result['until'])
         self.assert_session_links(result)
+
+    def test_morning_checks_after_publish_once_per_day_and_measures_cost(self):
+        config = self.home / '.config/gsd'
+        config.mkdir(parents=True)
+        for name in ('notion.token', 'notion-check-reviewed'):
+            (config / name).touch()
+        morning = NOW.replace(hour=3, minute=40)
+        with patch(__name__ + '.NOW', morning):
+            result = self.invoke(FAKE_CHECK_DELAY='0.05')
+            commands = self.commands()
+            self.assertEqual(commands[-2][:2], ['publish', 'notion'])
+            self.assertNotIn('--check', commands[-2])
+            self.assertIn('--check', commands[-1])
+            self.assertGreaterEqual(result['counts']['notion_check_seconds'], 0.05)
+            # The real publisher timestamps its check; use the synthetic clock's day.
+            log = self.root / 'notion-publish.jsonl'
+            entry = json.loads(log.read_text().splitlines()[-1])
+            entry['timestamp'] = morning.isoformat()
+            log.write_text(json.dumps(entry) + '\n')
+            self.invoke()
+            self.assertEqual(sum('--check' in c for c in self.commands()), 1)
+        self.invoke()
+        self.assertEqual(sum('--check' in c for c in self.commands()), 1)
 
     def test_qmd_clips_to_oldest_fresh_through_not_last_complete(self):
         self.set_status(whatsapp='2026-10-17T16:00:00+02:00', fathom='2026-10-17T15:00Z')
@@ -697,6 +726,7 @@ step.run(SimpleNamespace(since='2026-01-01T00:00:00Z', until='2026-01-02T00:00:0
         self.assertEqual(json.loads(lines[0]), {'kind': 'unrelated'})
         self.assertEqual(len(lines), 2)
         self.assertEqual(result['published'], ['archive', 'publish qmd', 'backup', 'publish notion'])
+        self.assertEqual(result['notion'], 'published')
         self.assertEqual(
             set(result),
             {
@@ -711,8 +741,17 @@ step.run(SimpleNamespace(since='2026-01-01T00:00:00Z', until='2026-01-02T00:00:0
                 'weighted_tokens',
                 'minutes',
                 'published',
+                'notion',
             },
         )
+
+    def test_notion_skip_names_missing_review_marker(self):
+        gate = self.home / '.config/gsd'
+        gate.mkdir(parents=True)
+        (gate / 'notion.token').touch()
+        result = self.invoke()
+        self.assertEqual(result['notion'], 'skipped (missing notion-check-reviewed)')
+        self.assertNotIn('publish notion', result['published'])
 
     def test_notion_refusal_or_incomplete_relations_are_not_claimed_as_published(self):
         gate = self.home / '.config/gsd'

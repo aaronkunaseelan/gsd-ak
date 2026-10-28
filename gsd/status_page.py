@@ -15,6 +15,9 @@ from pathlib import Path
 from . import db as store
 from . import intent, notion
 from .runs import outcome
+from .contract_validate import problems
+
+INTENT_CONTRACT = json.loads((store.ROOT / 'contracts/vendor/intent-1.json').read_text())
 
 SPARK = '▁▂▃▄▅▆▇█'
 
@@ -60,33 +63,21 @@ def steward_view():
     try:
         result = subprocess.run(['steward', 'intent', '--json'], capture_output=True, text=True, timeout=30, check=True)
         doc = json.loads(result.stdout)
-        if (doc['schema'] != 'intent/1' or doc['system'] != 'steward'
-                or doc['state'] not in ('green', 'red', 'unknown')
-                or type(doc['at']) not in (int, float) or not isinstance(doc['blocks'], list)):
+        if problems(INTENT_CONTRACT, doc) or doc['system'] != 'steward':
             return None
         blocks = {b['kind']: b for b in doc['blocks']}
         jobs = []
         for kind in ('runs', 'schedule'):
             block = blocks[kind]
-            if block['layer'] != 'process' or not isinstance(block['items'], list):
-                return None
             for item in block['items']:
-                if not isinstance(item, dict) or 'job' not in item:
-                    return None
                 if item['job'] != 'gsd-steady':
                     continue
-                if item['reason'] is not None and not isinstance(item['reason'], str):
-                    return None
                 if kind == 'runs':
-                    if (not isinstance(item['id'], str) or not item['id'].startswith('run-')
-                            or not isinstance(item['status'], str) or not isinstance(item['started_at'], str)):
+                    if not item['id'].startswith('run-'):
                         return None
                     at(item['started_at'])
                     at(item['ended_at'])
                 else:
-                    if (not isinstance(item['at'], str) or
-                            (item['est_min'] is not None and type(item['est_min']) not in (int, float))):
-                        return None
                     at(item['at'])
                 jobs.append(item)
     except (OSError, ValueError, KeyError, TypeError, OverflowError, subprocess.SubprocessError):

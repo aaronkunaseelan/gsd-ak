@@ -30,6 +30,10 @@ CHANGE_SQL = """CREATE TABLE change_sets (
   origin TEXT NOT NULL CHECK (origin IN ('pipeline','agent','owner','port')),
   step_id TEXT, window_until TEXT, note TEXT
 ) STRICT;"""
+NOTION_MAP_SQL = """CREATE TABLE IF NOT EXISTS notion_map (
+ record_id TEXT PRIMARY KEY, page_id TEXT, content_hash TEXT,
+ body_hash TEXT, published_at TEXT
+) STRICT;"""
 DRAFT_SQL = """
 CREATE TABLE draft_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
 CREATE TABLE draft_change (
@@ -181,7 +185,7 @@ def migrate_d29(db):
 def migrate(db, draft=False):
     """Only DDL path, including fresh stores and optional snapshot-only tables."""
     version = db.execute('PRAGMA user_version').fetchone()[0]
-    if version > 4:
+    if version > 5:
         raise ValueError('store schema is newer than this CLI')
     trigger = db.execute("SELECT sql FROM sqlite_master WHERE name='items_state_enum'").fetchone()
     if trigger and 'awaiting_' in trigger[0]:
@@ -204,11 +208,7 @@ def migrate(db, draft=False):
         db.executescript('BEGIN IMMEDIATE;\n' + CHANGE_SQL + '\nPRAGMA user_version=1; COMMIT;')
     else:
         db.execute('PRAGMA user_version=1')
-    db.executescript('''
-CREATE TABLE IF NOT EXISTS notion_map (
- record_id TEXT PRIMARY KEY, page_id TEXT NOT NULL, content_hash TEXT,
- body_hash TEXT, published_at TEXT
-) STRICT;
+    db.executescript(NOTION_MAP_SQL + '''
 CREATE TABLE IF NOT EXISTS notion_sources (kind TEXT PRIMARY KEY, data_source_id TEXT NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS publish_positions (lane TEXT PRIMARY KEY, position INTEGER NOT NULL) STRICT;
 PRAGMA user_version=2;
@@ -223,6 +223,16 @@ PRAGMA user_version=2;
     from .feed import SQL
 
     db.executescript('BEGIN IMMEDIATE;\n' + SQL + '\nPRAGMA user_version=4; COMMIT;')
+    # A null page identity retains an attempted create until remote discovery
+    # resolves it. Rebuild only the auxiliary mapping, never graph history.
+    if any(r[1] == 'page_id' and r[3] for r in db.execute('PRAGMA table_info(notion_map)')):
+        db.executescript('''BEGIN IMMEDIATE;
+ALTER TABLE notion_map RENAME TO notion_map_old;
+''' + NOTION_MAP_SQL + '''
+INSERT INTO notion_map SELECT * FROM notion_map_old;
+DROP TABLE notion_map_old;
+COMMIT;''')
+    db.execute('PRAGMA user_version=5')
     if draft and not has_table(db, 'draft_meta'):
         db.executescript('BEGIN IMMEDIATE;\n' + DRAFT_SQL + '\nCOMMIT;')
     return folded

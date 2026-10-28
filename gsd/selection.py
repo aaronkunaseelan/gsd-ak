@@ -36,7 +36,6 @@ SUBJECT_PREFIX = re.compile(r'^\s*((re|fwd?|aw|tr|sv|wg|rv)\s*(\[\d+\])?\s*:\s*)
 LONG_URL = re.compile(
     r'<?https?://(?!(?:docs|drive)\.google\.com)([^/\s>]+)[^\s>]{40,}>?'
 )  # tracking links: domain only
-ATTACH_LINE = re.compile(r'^(\S+) \((.*)\)$')  # rendered 'ID (name, MIME, state)'
 def owner_sender():
     number, domain = owner.get('whatsapp_jid').split('@')
     aliases = '|'.join(re.escape(a) for a in owner.get('whatsapp_aliases'))
@@ -96,7 +95,7 @@ def render_whatsapp(chats):
     return cites, lines, n, senders, kept_docs
 
 
-def whatsapp_chats(rows, docs, rendered):
+def whatsapp_chats(rows, docs):
     chats, undecodable, media = {}, 0, 0
     for row in rows:
         doc = docs.get(row['id'])
@@ -105,7 +104,7 @@ def whatsapp_chats(rows, docs, rendered):
             text = ''
         if not text:
             types = [
-                a['type'] for a in attachments_of(doc, rendered.get(row['id'], '')) if a['type']
+                a['type'] for a in attachments_of(doc) if a.get('type')
             ]
             # No text or attachment: an undecodable reaction, poll or edit.
             if not types:
@@ -127,7 +126,7 @@ def whatsapp_chats(rows, docs, rendered):
     return chats, undecodable, media
 
 
-def mail_entries(rows, docs, rendered):
+def mail_entries(rows, docs):
     kept, dropped = [], []
     for row in rows:
         doc = docs.get(row['id'], {})
@@ -156,7 +155,7 @@ def mail_entries(rows, docs, rendered):
             entry['why'] = 'drop:empty-body'
             dropped.append(entry)
             continue
-        entry['attachments'] = attachment_block(rendered.get(row['id'], ''))
+        entry['attachments'] = attachments_of(doc)
         kept.append((entry, doc))
     return kept, dropped
 
@@ -230,45 +229,14 @@ def when(text):
     return datetime.fromisoformat(store.iso(text))
 
 
-def attachment_block(text):
-    """Indented lines under the rendered 'Attachments:' header, up to the '---' rule."""
-    out, on = [], False
-    for line in text.partition('\n---\n')[0].splitlines():
-        if line == 'Attachments:':
-            on = True
-        elif on and line.startswith(' '):
-            out.append(line.strip())
-        else:
-            on = False
-    return out
+def attachments_of(doc):
+    """QMD's structured attachment refs, including its bounded head projection."""
+    return [a for a in doc.get('attachments') or [] if isinstance(a, dict)]
 
 
-def block_attachments(text):
-    """'ID (name, MIME, state)' lines of the rendered header as {id, name, type} dicts."""
-    out = []
-    for line in attachment_block(text):
-        m = ATTACH_LINE.match(line)
-        if m:
-            bits = m.group(2).rsplit(', ', 2)
-            out.append(
-                {
-                    'id': m.group(1),
-                    'name': bits[0] if len(bits) == 3 else m.group(2),
-                    'type': bits[1] if len(bits) == 3 else '',
-                }
-            )
-    return out
-
-
-def attachments_of(doc, text):
-    """The doc's attachments list when QMD gives one, else the rendered header."""
-    listed = [a for a in doc.get('attachments') or [] if isinstance(a, dict)]
-    if listed:
-        return [
-            {'id': a.get('id', ''), 'name': a.get('name', ''), 'type': a.get('type', '')}
-            for a in listed
-        ]
-    return block_attachments(text)
+def attachment_text(attachment):
+    head = attachment.get('head') or {}
+    return head.get('calendar_summary') or head.get('text', '')
 
 
 def field(doc, key):
@@ -284,11 +252,7 @@ def own_text(doc, skip=OWN_SKIP):
 
 
 def attachment_heads(doc):
-    return [
-        p['text'].strip()
-        for p in doc.get('parts') or []
-        if p.get('kind') == 'attachment' and p.get('text', '').strip()
-    ]
+    return [text for a in attachments_of(doc) if (text := attachment_text(a).strip())]
 
 
 def mail_sender(frm):
@@ -326,12 +290,11 @@ def source_counts(scanned, rows, kind):
     }
 
 
-def fetch(qmd, ids, docs, rendered):
+def fetch(qmd, ids, docs):
     ids = list(dict.fromkeys(ids))
     for i in range(0, len(ids), BATCH):
         res = qmd('get', *ids[i : i + BATCH], *GET_ARGS)
         for item in [res] if isinstance(res, dict) else res:
-            rendered[item['id']] = item.get('text', '')
             for doc in item.get('docs') or []:
                 docs[doc['id']] = doc
     missing = [ref for ref in ids if not docs.get(ref)]
@@ -339,10 +302,10 @@ def fetch(qmd, ids, docs, rendered):
         raise ValueError('missing primary document: ' + ', '.join(missing))
 
 
-def meetings(qmd, feed, until, docs, rendered, extras):
+def meetings(qmd, feed, until, docs, extras):
     scanned = feed.rows('fathom')
     rows = source_rows(scanned, 'meeting')
-    fetch(qmd, [r['id'] for r in rows], docs, rendered)
+    fetch(qmd, [r['id'] for r in rows], docs)
     kept, blocks, refs = [], [], {}
     for row in rows:
         doc = docs.get(row['id'])
@@ -370,11 +333,11 @@ def meetings(qmd, feed, until, docs, rendered, extras):
     }
 
 
-def mail(qmd, feed, docs, rendered):
+def mail(qmd, feed, docs):
     scanned = feed.rows('gmail')
     rows = source_rows(scanned, 'email')
-    fetch(qmd, [r['id'] for r in rows], docs, rendered)
-    kept, dropped = mail_entries(rows, docs, rendered)
+    fetch(qmd, [r['id'] for r in rows], docs)
+    kept, dropped = mail_entries(rows, docs)
     entries = [entry for entry, _ in kept]
     manifest = {
         'source_items': len(rows),
@@ -413,24 +376,24 @@ def render_mail(entries, refs=None):
             ]
             if entry.get('selected_in'):
                 lines.append(f'Parent selection: {entry["why"]} in {entry["selected_in"]}; new attached evidence follows.')
-            attachments, keep = [], True
+            attachments = []
             reverse = {v: k for k, v in (refs or {}).items() if k.startswith('att#')}
-            for line in entry['attachments']:
-                m = ATTACH_LINE.match(line)
-                if m:
-                    ref = m.group(1)
-                    # Derived generic URL refs duplicate links in the body. Shared
-                    # meetings get their own meeting block; real attachments stay.
-                    keep = '/att/link-' not in ref
-                    if keep and refs is not None:
-                        short = reverse.get(ref)
-                        if not short:
-                            short = f'att#{1 + sum(k.startswith("att#") for k in refs):04d}'
-                            refs[short] = ref
-                            reverse[ref] = short
-                        line = short + line[len(ref) :]
-                if keep:
-                    attachments.append(line)
+            for attachment in entry['attachments']:
+                ref = attachment['id']
+                # Derived generic URL refs duplicate links in the body. Shared
+                # meetings get their own meeting block; real attachments stay.
+                if '/att/link-' in ref:
+                    continue
+                if refs is not None:
+                    short = reverse.get(ref)
+                    if not short:
+                        short = f'att#{1 + sum(k.startswith("att#") for k in refs):04d}'
+                        refs[short] = ref
+                        reverse[ref] = short
+                    ref = short
+                state = (attachment.get('head') or {}).get('state', 'unknown')
+                attachments.append(f'{ref} ({attachment.get("name", "")}, {attachment.get("type", "")}, {state})')
+                attachments.extend(line.strip() for line in attachment_text(attachment).splitlines())
             if attachments:
                 lines += ['[attachments]', *attachments]
             lines += entry.get('heads', [])
@@ -438,11 +401,11 @@ def render_mail(entries, refs=None):
     return '\n'.join(view)
 
 
-def whatsapp(qmd, feed, docs, rendered):
+def whatsapp(qmd, feed, docs):
     scanned = feed.rows('whatsapp')
     rows = source_rows(scanned, 'message')
-    fetch(qmd, [r['id'] for r in rows], docs, rendered)
-    chats, undecodable, media = whatsapp_chats(rows, docs, rendered)
+    fetch(qmd, [r['id'] for r in rows], docs)
+    chats, undecodable, media = whatsapp_chats(rows, docs)
     cites, lines, n, senders, kept_docs = render_whatsapp(chats)
     manifest = {
         'source_items': len(rows),
@@ -491,7 +454,7 @@ def people(mail_entries, wa_senders):
     return '\n'.join(out)
 
 
-def late_inputs(qmd, feed, docs, rendered, packs):
+def late_inputs(qmd, feed, docs, packs):
     """Admit unseen child content under its parent's selection provenance."""
     children = []
     for source, rows in feed.arrivals.items():
@@ -510,7 +473,7 @@ def late_inputs(qmd, feed, docs, rendered, packs):
         if proof.get('included'):
             # Compare the same document view on both sides. Feed versions are
             # opaque strings, not the structured version returned by qmd get.
-            fetch(qmd, [ref], docs, rendered)
+            fetch(qmd, [ref], docs)
             committed = next((cid for child, cid in proof['included'] if child == docs[ref]), None)
             if committed:
                 outcome.update(state='excluded', why='included at parent commit ' + committed)
@@ -520,18 +483,18 @@ def late_inputs(qmd, feed, docs, rendered, packs):
             if proof.get('doc'):
                 docs[parent] = proof['doc']
             elif parent not in docs:
-                fetch(qmd, [parent], docs, rendered)
+                fetch(qmd, [parent], docs)
             doc = docs[parent]
             context_row = {'id': parent, 'time': doc.get('time') or row['time'],
                            'selected_in': proof.get('parent_commit'), 'why': proof.get('why')}
             if source == 'gmail':
-                kept, dropped = mail_entries([context_row], docs, rendered)
+                kept, dropped = mail_entries([context_row], docs)
                 if not kept:
                     outcome.update(state='excluded', why='parent: ' + dropped[0]['why'])
                     continue
                 pack['entries'].append(kept[0][0])
             elif source == 'whatsapp':
-                chats, _, _ = whatsapp_chats([context_row], docs, rendered)
+                chats, _, _ = whatsapp_chats([context_row], docs)
                 if not chats:
                     raise ValueError('late attachment parent is unreadable: ' + parent)
             pack['docs'].append(doc)
@@ -544,7 +507,7 @@ def late_inputs(qmd, feed, docs, rendered, packs):
         # Fetch the child, not just its parent's old preview. This is new evidence
         # even though both its own time and the parent are before the current cut.
         if ref not in docs:
-            fetch(qmd, [ref], docs, rendered)
+            fetch(qmd, [ref], docs)
         outcome.update(state='selected', why=proof.get('why') or next(
             (e['why'] for e in pack.get('entries', []) if e['ref'] == parent), 'keep:parent'))
         pack['manifest']['excluded_materialised'] -= 1
@@ -557,7 +520,7 @@ def late_inputs(qmd, feed, docs, rendered, packs):
     if wa['manifest'].get('context_parents'):
         times = {r['id']: r['time'] for r in feed.arrivals['whatsapp']}
         rows = [{'id': d['id'], 'time': d.get('time') or times[d['id']]} for d in wa['docs']]
-        chats, _, _ = whatsapp_chats(rows, docs, rendered)
+        chats, _, _ = whatsapp_chats(rows, docs)
         cites, lines, _, _, _ = render_whatsapp(chats)
         wa['refs'], wa['view'] = cites, '\n'.join(lines)
     return admitted
@@ -565,12 +528,12 @@ def late_inputs(qmd, feed, docs, rendered, packs):
 
 def select(qmd, since, until, extras=()):
     """Arrival pack views for one run: see the module docstring for the rules."""
-    docs, rendered = {}, {}
+    docs = {}
     feed = Feed(qmd, since, until)
-    fathom = meetings(qmd, feed, until, docs, rendered, extras)
-    gmail = mail(qmd, feed, docs, rendered)
-    wa = whatsapp(qmd, feed, docs, rendered)
-    children = late_inputs(qmd, feed, docs, rendered, {'gmail': gmail, 'fathom': fathom, 'whatsapp': wa})
+    fathom = meetings(qmd, feed, until, docs, extras)
+    gmail = mail(qmd, feed, docs)
+    wa = whatsapp(qmd, feed, docs)
+    children = late_inputs(qmd, feed, docs, {'gmail': gmail, 'fathom': fathom, 'whatsapp': wa})
     kept = gmail['docs'] + fathom['docs'] + wa['docs'] + children
     manifest = {
         'since': since,

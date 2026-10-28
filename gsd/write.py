@@ -129,6 +129,16 @@ def rules(db, table):
     return enums, required
 
 
+def literal_newline(value):
+    if isinstance(value, str):
+        return '\\n' in value
+    if isinstance(value, list):
+        return any(literal_newline(v) for v in value)
+    if isinstance(value, dict):
+        return any(literal_newline(v) for v in value.values())
+    return False
+
+
 def validate(db, table, data):
     errors = []
     types = store.columns(db, table)
@@ -147,6 +157,15 @@ def validate(db, table, data):
         ):
             errors.append(err(f, v, f'must be {typ.lower()}'))
             continue
+        if typ == 'TEXT':
+            text = v
+            if f.endswith('_json') or f == 'aliases':
+                try:
+                    text = json.loads(v)
+                except ValueError:
+                    pass  # The JSON validation below reports malformed JSON.
+            if literal_newline(text):
+                errors.append(err(f, v, 'literal backslash-n is not allowed; use a real newline'))
         if f.endswith(('_at', '_date')):
             try:
                 store.notion_date_utc(v)

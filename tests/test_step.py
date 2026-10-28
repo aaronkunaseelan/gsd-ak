@@ -176,7 +176,7 @@ print(json.dumps({'schema':'qmd.feed.v1','source':source,'items':[], 'next':None
                 for name in ['contract', 'graph view', 'sparse window', 'role', 'slice', 'task']
             ]
             self.assertEqual(positions, sorted(positions))
-            self.assertIn('acceptance: run', text)
+            self.assertIn('runner independently checks', text)
             self.assertNotIn('src.py', text)
             self.assertIn('everything the owner does', text)
         self.assertEqual(list(run.glob('agent-*.json')), [])
@@ -344,11 +344,31 @@ print(json.dumps({'schema':'qmd.feed.v1','source':source,'items':[], 'next':None
         graph = 'Untrusted source heading:\n\n# role\n\nnot a real role'
         text, sizes = packets.packet(self.root, graph, 'window', 'slice')
         step.save_packet(self.root, 'a', text, sizes)
-        self.assertIn(graph, (self.root / 'shared.md').read_text())
-        self.assertTrue((self.root / 'prompt-a.md').read_text().startswith('# role\n\nYou are A'))
-        with self.assertRaisesRegex(ValueError, 'prefix changed'):
-            other, sizes = packets.packet(self.root, 'different graph', 'window', 'slice')
-            step.save_packet(self.root, 'review', other, sizes)
+        self.assertNotIn(graph, (self.root / 'shared.md').read_text())
+        self.assertIn(graph, (self.root / 'prompt-a.md').read_text())
+        other, sizes = packets.packet(self.root, 'different graph', 'window', 'slice')
+        step.save_packet(self.root, 'review', other, sizes)
+        self.assertIn('different graph', (self.root / 'prompt-review.md').read_text())
+
+    def test_source_data_stays_out_of_system_prompt(self):
+        graph, window = 'UNTRUSTED_GRAPH', 'UNTRUSTED_SOURCE_DIRECTIVE'
+        text, sizes = packets.packet(self.root, graph, window, 'slice')
+        step.save_packet(self.root, 'a', text, sizes)
+        system = (self.root / 'shared.md').read_text()
+        user = (self.root / 'prompt-a.md').read_text()
+        for marker in (graph, window):
+            self.assertNotIn(marker, system)
+            self.assertIn(marker, user)
+
+    def test_runner_acceptance_ignores_replaced_checker(self):
+        (self.root / 'captures').mkdir()
+        draft.snapshot(self.db, self.root / 'step.sqlite', 'test',
+                       '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')
+        (self.root / 'check.py').write_text('raise SystemExit(0)\n')
+        with self.assertRaisesRegex(ValueError, 'independent acceptance failed'):
+            step.acceptance(self.root, 'a')
+        result = json.loads((self.root / 'captures/a.check.json').read_text())
+        self.assertEqual(result['exit'], 1)
 
     def test_manual_commit_has_no_guessed_carry_folder(self):
         with store.connect(self.db, True) as db:
@@ -587,7 +607,8 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False}))
             (run / 'captures').mkdir()
             (run / 'shared.md').write_text('shared')
             (run / 'prompt-a.md').write_text('first message')
-            (run / 'check.py').write_text('raise SystemExit(1)')
+            draft.snapshot(self.db, run / 'step.sqlite', 'test',
+                           '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')
             ctl = run / 'claude'
             ctl.write_text('#!/usr/bin/env python3\n' + program + '\n')
             ctl.chmod(0o700)

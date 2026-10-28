@@ -19,10 +19,11 @@ import uuid
 from pathlib import Path
 from collections import Counter
 from . import db as store
-from . import owner, read
+from . import owner, read, write
 from .items import is_open
 
 VERSION = '2026-03-11'
+PROJECTION_CHECK_MAX_AGE = datetime.timedelta(hours=26)
 PORT = Path.home() / '.local/share/gsd/port'
 # One row per public gsd field:
 # (field, property or body heading, allowed REST types; empty = body).
@@ -132,6 +133,17 @@ def sequence(value):
     return value if isinstance(value, list) else [value]
 
 
+def canonical_date(value):
+    """Notion date properties retain calendar dates and UTC minute instants."""
+    if value in (None, ''):
+        return None
+    value = str(value)
+    if len(value) == 10:
+        return datetime.date.fromisoformat(value).isoformat()
+    instant = datetime.datetime.fromisoformat(store.iso(value).replace('Z', '+00:00'))
+    return instant.isoformat(timespec='minutes').replace('+00:00', 'Z')
+
+
 def encode(typ, value):
     """Only writable property types; people/rollup/formula are never synthesized."""
     if typ in ('title', 'rich_text'):
@@ -141,7 +153,7 @@ def encode(typ, value):
     if typ == 'multi_select':
         return {typ: [{'name': str(v)} for v in sequence(value)]}
     if typ == 'date':
-        return {typ: {'start': str(value)} if value not in (None, '') else None}
+        return {typ: {'start': canonical_date(value)} if value not in (None, '') else None}
     if typ in ('number', 'url', 'email'):
         return {typ: value if value != '' else None}
     if typ == 'checkbox':
@@ -153,23 +165,41 @@ def encode(typ, value):
     raise ValueError('unsupported Notion property type: ' + typ)
 
 
-def expected_schema(table):
-    return {name: {'type': types.split()[0]} for _, name, types in FIELDS[table] if types}
+def expected_schema(table, sources=None):
+    schema = {}
+    for field, name, types in FIELDS[table]:
+        if not types:
+            continue
+        typ = types.split()[0]
+        schema[name] = {'type': typ, typ: {}}
+        if typ == 'relation' and sources is not None:
+            target = store.KINDS[write.REFERENCES[field]]
+            schema[name][typ] = {
+                'data_source_id': sources.get(target, ''),
+                'type': 'single_property', 'single_property': {},
+            }
+    return schema
 
 
 def markdown(sections):
-    return '\n\n---\n\n'.join(f'## {k}\n\n{v}' for k, v in sections.items())
+    return '\n\n---\n\n'.join(f'## {k}\n\n{demote(str(v)).rstrip()}' for k, v in sections.items())
 
 
-def demote(text):
-    lines, fence = [], None
+def markdown_lines(text):
+    """One fenced-code grammar for rendering, section boundaries and attribution."""
+    offset, fence = 0, None
     for line in text.splitlines(keepends=True):
         stripped = line.lstrip()
         if stripped.startswith(('```', '~~~')):
             mark = stripped[:3]
             fence = None if fence == mark else mark if fence is None else fence
-        lines.append(re.sub(r'^#{1,2} ', '### ', line) if fence is None else line)
-    return ''.join(lines)
+        yield offset, line, fence is None
+        offset += len(line)
+
+
+def demote(text):
+    return ''.join(re.sub(r'^#{1,2} ', '### ', line) if outside else line
+                   for _, line, outside in markdown_lines(text))
 
 
 def actions(value):
@@ -577,8 +607,10 @@ def canonical_property(value):
     if typ in ('relation', 'multi_select'):
         return sorted(v['id'].replace('-', '') if typ == 'relation' else v['name'] for v in data)
     if typ == 'date':
-        start = data.get('start') if data else None
-        return store.iso(start) if start and 'T' in start else start
+        if not data:
+            return None
+        return (canonical_date(data.get('start')), canonical_date(data.get('end')),
+                data.get('time_zone'))
     return data
 
 
@@ -590,27 +622,46 @@ def matches(actual, expected):
 
 
 def section_ranges(body):
-    # Only top-level generated H2 headings outside fenced code are markers.
-    starts, offset, fence = [], 0, None
-    for line in body.splitlines(keepends=True):
-        stripped = line.lstrip()
-        if stripped.startswith(('```', '~~~')):
-            mark = stripped[:3]
-            fence = None if fence == mark else mark if fence is None else fence
-        if fence is None and line.startswith('## '):
-            starts.append((offset, line[3:].strip()))
-        offset += len(line)
+    # Every H1/H2 outside fenced code is a boundary. Generated section bodies
+    # demote those headings, so internal dividers remain ordinary content.
+    starts = []
+    for offset, line, outside in markdown_lines(body):
+        if outside and line.startswith(('# ', '## ')):
+            heading = re.sub(r'<span\s+discussion-urls=[^>]*>(.*?)</span>',
+                             r'\1', line[3:].strip()) if line.startswith('## ') else None
+            starts.append((offset, heading))
     result = {}
     for i, (start, heading) in enumerate(starts):
         end = starts[i + 1][0] if i + 1 < len(starts) else len(body)
-        text = body[start:end]
-        if not heading.endswith(' Notes'):
-            # A divider ends compiled/generated sections even if a legacy next
-            # heading is missing. Do not absorb the following unrelated block.
-            text = re.split(r'\n[ \t]*---[ \t]*\n', text, maxsplit=1)[0]
-        text = re.sub(r'\s*\n---\s*$', '', text).rstrip()
+        if heading is None:
+            continue
+        text = body[start:end].rstrip()
+        if i + 1 < len(starts):
+            # Strip only the inter-section separator immediately before the
+            # next heading, never a divider within the section's content.
+            text = re.sub(r'\n[ \t]*---[ \t]*$', '', text).rstrip()
         result.setdefault(heading, []).append(text)
     return result
+
+
+def section_ambiguities(ranges, sections):
+    """An internal divider can also hide a missing marker or unheaded owner block.
+
+    Exact canonical content is attributable. Otherwise, without historical body
+    state, choosing which side of that divider to overwrite would be guessing.
+    A divider with nothing after it hides nothing.
+    """
+    ambiguous = []
+    for heading, value in sections.items():
+        entries = ranges.get(heading, [])
+        if len(entries) != 1:
+            continue
+        old = entries[0]
+        new = old.split('\n', 1)[0] + '\n' + markdown({heading: value}).partition('\n')[2]
+        if old != new and any(outside and line.strip() == '---' and old[offset + len(line):].strip()
+                              for offset, line, outside in markdown_lines(old)):
+            ambiguous.append(heading)
+    return ambiguous
 
 
 def markdown_warnings(response, errors):
@@ -627,16 +678,24 @@ def update_body(client, page, sections, *, errors=None):
         # Clear stale metadata in place; retain the wrapper rather than delete
         # blocks which might carry comments. New empty pages omit it entirely.
         sections['Metadata'] = EMPTY
+    for heading in sections:
+        if len(ranges.get(heading, [])) > 1:
+            raise ValueError('ambiguous Notion section marker: ' + heading)
+    ambiguous = section_ambiguities(ranges, sections)
+    if ambiguous:
+        errors.append('unattributed Notion section content: ' + ', '.join(ambiguous) + '; body unchanged')
+        return []
     missing = []
     for heading, value in sections.items():
-        new = f'## {heading}\n\n{value}'
         old = ranges.get(heading, [])
-        if len(old) > 1:
-            raise ValueError('ambiguous Notion section marker: ' + heading)
         if not old:
             missing.append(heading)
-        elif old[0] != new:
-            markdown_warnings(client.update_section(page, old[0], new), errors)
+        else:
+            # Discussion wrappers identify the existing heading/comment anchor.
+            # Keep the heading byte-for-byte; only its body is generated.
+            new = old[0].split('\n', 1)[0] + '\n' + markdown({heading: value}).partition('\n')[2]
+            if old[0] != new:
+                markdown_warnings(client.update_section(page, old[0], new), errors)
     if missing:
         markdown_warnings(
             client.append(page, '\n\n---\n\n' + markdown({k: sections[k] for k in missing})),
@@ -649,7 +708,7 @@ def find_created(client, source, row, props, *, mapped_ids=(), preflight=None, f
     """Inspect only unknown identities, reusing one source inventory per publish.
     No negative query is proof that a timed-out create did not land later.
     """
-    mapped = {identity(page) for page in mapped_ids}
+    mapped = {identity(page) for page in mapped_ids if page}
     if preflight is None:
         preflight = {}
     if fresh or source not in preflight:
@@ -663,7 +722,8 @@ def find_created(client, source, row, props, *, mapped_ids=(), preflight=None, f
         if identity(page) in mapped:
             continue
         body = client.body(page)
-        if section_ranges(body).get('gsd id') == [f'## gsd id\n\n{row["record_id"]}']:
+        markers = section_ranges(body).get('gsd id', [])
+        if len(markers) == 1 and markers[0].partition('\n')[2].strip() == row['record_id']:
             found.append(page)
     if len(found) > 1:
         raise ValueError('multiple Notion pages carry this gsd id; reconcile manually')
@@ -746,9 +806,9 @@ def publish(
         raise ValueError('--check, --seed, --probe-comments and --hardcut are mutually exclusive')
     if hardcut and not plan and not yes:
         raise ValueError('Notion hardcut requires explicit --yes (or use --plan)')
-    if check or do_seed:
+    if do_seed:
         return _publish(path, check, do_seed, probe, client=client)
-    if not (hardcut and plan):
+    if not check and not (hardcut and plan):
         gate(review=not hardcut)
     # Timer and manual publishes must not race a missing-page query/create.
     lock_path = Path(str(Path(path).expanduser().resolve()) + '.notion.lock')
@@ -771,7 +831,13 @@ def publish(
                     raise ValueError('Notion hardcut requires a token, including --plan')
                 client = Client(secret)
             return hardcut_publish(path, client, plan)
-        return _publish(path, check, do_seed, probe, client=client)
+        try:
+            return _publish(path, check, do_seed, probe, client=client)
+        except (ValueError, OSError):
+            if check:
+                publish_log(path, {'requests': client.requests() if client else None, 'plan': {},
+                                   'projection_check': {'known': False, 'reason': 'remote check failed; inspect --check error'}})
+            raise
 
 
 def _publish(path, check=False, do_seed=False, probe=None, *, client=None):
@@ -837,11 +903,18 @@ def _publish(path, check=False, do_seed=False, probe=None, *, client=None):
         'appended_sections': [],
     }
     if check:
-        reconcile(client, report, rendered, mapped)
-        report['requests'] = client.requests() if client else None
-        return report
+        try:
+            reconcile(client, report, rendered, mapped, schemas, sources)
+            report['projection_check'] = projection_summary(report) if client else {'known': False, 'reason': report['remote_checks']}
+            return report
+        finally:
+            report['requests'] = client.requests() if client else None
+            if 'projection_check' in report:
+                publish_log(path, report)
     try:
-        if any(p['errors'] for p in pages):
+        if any(p['errors'] for p in pages) or any(
+            diff['missing_or_wrong_type'] for diff in differences.values()
+        ):
             report['refused'] = (
                 'Resolve reported schema/source differences before publishing; no writes made'
             )
@@ -849,6 +922,9 @@ def _publish(path, check=False, do_seed=False, probe=None, *, client=None):
         changed = publish_pages(path, client, rendered, pages, schemas, sources, ids, report)
         report['published'] = sum(not p['errors'] for _, p in changed)
         for entry in archives:
+            if not entry['page_id']:
+                entry['errors'].append('uncertain Notion create; reconcile identity before archive')
+                continue
             try:
                 archive_page(client, entry['page_id'])
             except ValueError as e:
@@ -874,6 +950,8 @@ def publish_log(path, report):
         'published': report.get('published', 0),
         'archived': report.get('archived', 0),
     }
+    if 'projection_check' in report:
+        entry['projection_check'] = report['projection_check']
     dest = Path(path).expanduser().resolve().parent / 'notion-publish.jsonl'
     with open(dest, 'a', encoding='utf-8', opener=lambda p, f: os.open(p, f, 0o600)) as out:
         os.fchmod(out.fileno(), 0o600)
@@ -907,18 +985,7 @@ def hardcut_schema(table, actual, sources):
     """Only the title has an unambiguous rename; other legacy fields are replaced.
     One patch per source, single-sided relations (no extra reciprocal fields).
     """
-    desired = expected_schema(table)
-    for name, prop in desired.items():
-        typ = prop['type']
-        prop[typ] = (
-            {
-                'data_source_id': sources['people' if name == 'Owner' else 'projects'],
-                'type': 'single_property',
-                'single_property': {},
-            }
-            if typ == 'relation'
-            else {}
-        )
+    desired = expected_schema(table, sources)
     patch, ops = {}, {k: [] for k in ('renames', 'retypes', 'adds', 'deletes')}
     actual = dict(actual)
     titles = [name for name, prop in actual.items() if prop['type'] == 'title']
@@ -1067,7 +1134,7 @@ def hardcut_publish(path, client, plan):
     for row in rendered:
         old = mapped.get(row['record_id'])
         table = store.KINDS[row['kind']]
-        entry = inventory[table].get(identity(old['page_id'])) if old else None
+        entry = inventory[table].get(identity(old['page_id'])) if old and old['page_id'] else None
         if entry and identity(old['page_id']) not in used:
             ids[row['record_id']] = entry['page']['id']
             used.add(identity(old['page_id']))
@@ -1178,9 +1245,9 @@ def publish_schemas(client, sources):
         schemas[table] = (
             client.request('GET', '/data_sources/' + sources[table])['properties']
             if client and table in sources
-            else expected_schema(table)
+            else expected_schema(table, sources)
         )
-        expected = expected_schema(table)
+        expected = expected_schema(table, sources)
         allowed = {name: types.split() for _, name, types in FIELDS[table] if types}
         differences[table] = {
             'extra': sorted(set(schemas[table]) - set(expected)),
@@ -1192,6 +1259,9 @@ def publish_schemas(client, sources):
                 }
                 for name, types in allowed.items()
                 if schemas[table].get(name, {}).get('type') not in types
+                or (expected[name]['type'] == 'relation' and
+                    identity(schemas[table].get(name, {}).get('relation', {}).get('data_source_id', ''))
+                    != identity(expected[name]['relation']['data_source_id']))
             ],
         }
     return schemas, differences
@@ -1199,7 +1269,7 @@ def publish_schemas(client, sources):
 
 def publish_plan(rendered, mapped, schemas, sources):
     counts, pages = Counter(), []
-    ids = {rid: r['page_id'] for rid, r in mapped.items()}
+    ids = {rid: r['page_id'] for rid, r in mapped.items() if r['page_id']}
     for row in rendered:
         table = store.KINDS[row['kind']]
         _, errors = properties(row, schemas[table], ids)
@@ -1227,32 +1297,144 @@ def publish_plan(rendered, mapped, schemas, sources):
     return counts, pages, ids
 
 
-def reconcile(client, report, rendered, mapped):
+def projection_summary(report):
+    """Bounded findings only: no property values or page bodies in the log."""
+    classes = {name: report[name] for name in (
+        'property_differences', 'duplicate_sections', 'unmapped_pages',
+        'missing_pages', 'wrong_source_pages', 'trashed_pages',
+        'unreachable_pages', 'appended_sections', 'source_differences', 'pending_archives',
+        'ambiguous_sections')}
+    classes['schema_differences'] = [
+        {'page_id': table} for table, diff in report['schema_differences'].items()
+        if diff['extra'] or diff['missing_or_wrong_type']]
+    return {'known': True, 'classes': {
+        name: {'count': len(rows), 'ids': list(dict.fromkeys(r['page_id'] for r in rows if r['page_id']))[:2]}
+        for name, rows in classes.items()}}
+
+
+def latest_projection_check(path):
+    """The observation envelope belongs to the publisher, not its consumers."""
+    log = Path(path).expanduser().resolve().parent / 'notion-publish.jsonl'
+    latest = None
+    if log.exists():
+        with log.open() as stream:
+            for line in stream:
+                entry = json.loads(line)
+                if 'projection_check' in entry:
+                    latest = entry
+    return latest
+
+
+def projection_check_due(path, now):
+    """One check after the morning steady publish, using the existing ledger."""
+    local = now.astimezone(owner.zone())
+    if local.hour >= 12:
+        return False
+    try:
+        latest = latest_projection_check(path)
+        return not latest or datetime.datetime.fromisoformat(
+            store.iso(latest['timestamp'])
+        ).astimezone(owner.zone()).date() < local.date()
+    except (OSError, ValueError, TypeError, KeyError):
+        return True
+
+
+def projection_telemetry(path):
+    """An old observation is unknown even if all its checks once passed."""
+    try:
+        latest = latest_projection_check(path)
+        if latest:
+            age = datetime.datetime.now(datetime.UTC) - datetime.datetime.fromisoformat(
+                store.iso(latest['timestamp'])
+            )
+            if age < datetime.timedelta(0) or age > PROJECTION_CHECK_MAX_AGE:
+                return [{'name': 'notion_projection', 'ok': False,
+                         'reason': 'unknown: Notion projection check expired or future-dated; run publish notion --check'}], []
+    except (OSError, ValueError, TypeError, KeyError):
+        return [{'name': 'notion_projection', 'ok': False, 'reason': 'unknown: unreadable Notion publication ledger'}], []
+    if not latest or not latest['projection_check']['known']:
+        reason = latest['projection_check']['reason'] if latest else 'no publish notion --check recorded'
+        return [{'name': 'notion_projection', 'ok': False, 'reason': 'unknown: ' + reason}], []
+    checks, metrics = [], []
+    for name, result in latest['projection_check']['classes'].items():
+        checks.append({'name': 'notion_' + name, 'ok': result['count'] == 0,
+                       'reason': f"{result['count']} at {latest['timestamp']}; ids: " + ','.join(result['ids'])})
+        metrics.append({'name': 'notion_' + name, 'labels': {}, 'value': result['count'], 'unit': 'count'})
+    return checks, metrics
+
+
+def reconcile(client, report, rendered, mapped, schemas, sources):
     if client:
         report['edited_since_2026_08_06'], report['unreachable_pages'] = [], []
         rendered_by_id = {r['record_id']: r for r in rendered}
+        ids = {rid: old['page_id'] for rid, old in mapped.items() if old['page_id']}
+        for name in ('property_differences', 'duplicate_sections', 'unmapped_pages',
+                     'missing_pages', 'wrong_source_pages', 'trashed_pages', 'pending_archives',
+                     'ambiguous_sections'):
+            report[name] = []
+        report['missing_pages'] = [
+            {'record_id': rid, 'page_id': None, 'why': 'no mapped page'}
+            for rid in rendered_by_id.keys() - ids.keys()
+        ]
+        archives = {p['record_id'] for p in report['pages'] if p['action'] == 'archive'}
+        report['source_differences'] = [{'page_id': table} for table in FIELDS if table not in sources]
+        inventory = {}
+        for table, source in sources.items():
+            inventory[table] = {identity(p['id']) for p in client.paginate(
+                '/data_sources/' + source + '/query', 'POST')}
+            for page in sorted(inventory[table] - {identity(p) for p in ids.values()}):
+                report['unmapped_pages'].append({'page_id': page, 'data_source': source})
         for rid, old in mapped.items():
             page = old['page_id']
+            if not page:
+                if rid in archives:
+                    report['pending_archives'].append({'record_id': rid, 'page_id': None})
+                continue
             # A mapped page that is gone, trashed or no longer shared is a reconcile finding, not a crash.
             try:
                 meta = client.request('GET', '/pages/' + page)
             except ValueError as e:
                 if 'HTTP 404' not in str(e):
                     raise
-                report['unreachable_pages'].append(
-                    {'record_id': rid, 'page_id': page, 'why': 'not found or not shared'}
-                )
+                entry = {'record_id': rid, 'page_id': page, 'why': 'not found or not shared'}
+                report['unreachable_pages'].append(entry)
+                report['missing_pages'].append(entry)
                 continue
             if meta.get('in_trash') or meta.get('archived'):
+                report['trashed_pages'].append({'record_id': rid, 'page_id': page})
                 report['unreachable_pages'].append(
                     {'record_id': rid, 'page_id': page, 'why': 'in trash'}
                 )
                 continue
+            if rid in archives:
+                report['pending_archives'].append({'record_id': rid, 'page_id': page})
             if meta.get('last_edited_time', '') > owner.get('notion_import_cutoff'):
                 report['edited_since_2026_08_06'].append(page)
             if rid in rendered_by_id:
+                row = rendered_by_id[rid]
+                table = store.KINDS[row['kind']]
+                source = sources.get(table)
+                if not source or identity(meta.get('parent', {}).get('data_source_id', '')) != identity(source):
+                    report['wrong_source_pages'].append({'record_id': rid, 'page_id': page})
+                elif identity(page) not in inventory.get(table, set()):
+                    report['missing_pages'].append({'record_id': rid, 'page_id': page, 'why': 'absent from data-source inventory'})
+                expected, errors = properties(row, schemas[table], ids)
+                relations, relation_errors = properties(row, schemas[table], ids, relations=True)
+                expected.update(relations)
+                different = [name for name, value in expected.items()
+                             if not matches(meta.get('properties', {}), {name: value})]
+                if different or errors or relation_errors:
+                    report['property_differences'].append({'record_id': rid, 'page_id': page,
+                                                           'properties': different,
+                                                           'errors': errors + relation_errors})
                 ranges = section_ranges(client.body(page))
-                missing = [k for k in rendered_by_id[rid]['sections'] if k not in ranges]
+                ambiguous = section_ambiguities(ranges, row['sections'])
+                if ambiguous:
+                    report['ambiguous_sections'].append({'page_id': page, 'sections': ambiguous})
+                duplicates = [heading for heading, entries in ranges.items() if len(entries) > 1]
+                if duplicates:
+                    report['duplicate_sections'].append({'page_id': page, 'sections': duplicates})
+                missing = [k for k in row['sections'] if k not in ranges]
                 if missing:
                     report['appended_sections'].append({'page_id': page, 'sections': missing})
     else:
@@ -1271,13 +1453,13 @@ def publish_pages(path, client, rendered, pages, schemas, sources, ids, report, 
         if not page:
             source = sources[store.KINDS[row['kind']]]
             page = create_page(
-                client, source, row, props, recover=not hardcut,
+                path, client, source, row, props, recover=not hardcut,
                 mapped_ids=ids.values(), preflight=preflight,
             )
             ids[row['record_id']] = page
             save_map(path, row, page)
-        elif hardcut:
-            save_map(path, row, page)  # A failed cut must not leave a completed hash.
+        else:
+            save_map(path, row, page)  # Invalidate completion before any remote mutation.
         client.set_properties(page, props)
         if hardcut:
             hardcut_body(client, page, row['body'])
@@ -1300,7 +1482,7 @@ def publish_pages(path, client, rendered, pages, schemas, sources, ids, report, 
     return changed
 
 
-def create_page(client, source, row, props, *, recover=True, mapped_ids=(), preflight=None):
+def create_page(path, client, source, row, props, *, recover=True, mapped_ids=(), preflight=None):
     found, _ = (
         find_created(client, source, row, props, mapped_ids=mapped_ids, preflight=preflight)
         if recover else (None, False)
@@ -1308,6 +1490,15 @@ def create_page(client, source, row, props, *, recover=True, mapped_ids=(), pref
     if found:
         page = found['id']
     else:
+        with store.connect(path) as db:
+            pending = db.execute(
+                'SELECT 1 FROM notion_map WHERE record_id=? AND page_id IS NULL',
+                (row['record_id'],),
+            ).fetchone()
+        if pending:
+            raise ValueError('uncertain Notion create; awaiting remote reconciliation; no create retry attempted')
+        # Persist before POST: a process exit after sending is uncertain too.
+        save_map(path, row, None)
         try:
             page = client.request(
                 'POST',
@@ -1329,6 +1520,13 @@ def create_page(client, source, row, props, *, recover=True, mapped_ids=(), pref
                     'uncertain Notion create; read-back did not confirm success; no create retry attempted'
                 ) from None
             page = found['id']
+        except ValueError:
+            # A definite refusal is not an unresolved write. UncertainWrite is
+            # handled above and leaves its pending identity durable.
+            with store.connect(path, True) as db:
+                db.execute('DELETE FROM notion_map WHERE record_id=? AND page_id IS NULL',
+                           (row['record_id'],))
+            raise
     if preflight is not None and source in preflight:
         preflight[source] = [p for p in preflight[source] if identity(p) != identity(page)]
     return page

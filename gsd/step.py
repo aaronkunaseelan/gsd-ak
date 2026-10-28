@@ -8,7 +8,6 @@ import re
 import signal
 from pathlib import Path
 import subprocess
-import sys
 import uuid
 
 from . import db as store, read, draft, export, packets, tags, feed
@@ -168,18 +167,30 @@ def headless(run, name, args, user, env, receipt, timeout):
 
 
 def acceptance(run, name):
-    check = subprocess.run(
-        [sys.executable, '-I', str(run / 'check.py'), name], capture_output=True, timeout=60
-    )
+    with store.connect(run / 'step.sqlite') as db:
+        if name == 'a':
+            ok = db.execute('SELECT COUNT(*) FROM draft_change').fetchone()[0] >= 1
+            notes = run / 'open.md'
+        elif name.startswith('a-'):
+            ok = db.execute(
+                'SELECT COUNT(*) FROM draft_change WHERE change_id LIKE ?', (name + '-%',)
+            ).fetchone()[0] >= 1
+            notes = run / ('open-' + name + '.md')
+        else:
+            ok = db.execute(
+                'SELECT COUNT(*) FROM draft_change WHERE grp=? AND decision IS NULL', (name,)
+            ).fetchone()[0] == 0
+            notes = run / ('notes-' + name + '.md')
+    ok = ok and notes.is_file()
     save(
         run / 'captures' / f'{name}.check.json',
         {
-            'exit': check.returncode,
-            'stdout': check.stdout.decode(errors='replace'),
-            'stderr': check.stderr.decode(errors='replace'),
+            'exit': 0 if ok else 1,
+            'stdout': '',
+            'stderr': '',
         },
     )
-    if check.returncode:
+    if not ok:
         raise ValueError('independent acceptance failed')
 
 
@@ -226,20 +237,6 @@ def usage(stream):
         for call, iteration in zip(calls, messages):
             call['usage'].update({k: v for k, v in iteration.items() if k != 'type'})
     return calls, result
-
-
-CHECK = '''import pathlib, sqlite3, sys
-root = pathlib.Path(__file__).resolve().parent
-with sqlite3.connect('file:' + str(root / 'step.sqlite') + '?mode=ro', uri=True) as db:
-    group = sys.argv[1]
-    if group == 'a':
-        ok = db.execute('SELECT COUNT(*) FROM draft_change').fetchone()[0] >= 1 and (root / 'open.md').is_file()
-    elif group.startswith('a-'):
-        ok = db.execute('SELECT COUNT(*) FROM draft_change WHERE change_id LIKE ?', (group + '-%',)).fetchone()[0] >= 1 and (root / ('open-' + group + '.md')).is_file()
-    else:
-        ok = db.execute('SELECT COUNT(*) FROM draft_change WHERE grp=? AND decision IS NULL', (group,)).fetchone()[0] == 0 and (root / ('notes-' + group + '.md')).is_file()
-    sys.exit(0 if ok else 1)
-'''
 
 
 def previous_folder(db):
@@ -586,7 +583,6 @@ def prepare(a, run, step_id, since, until, select):
         text, sizes = packets.packet(run, graph, window, common_slice, tagged=tagged)
         save_packet(run, 'a', text, sizes)
         agent_sizes = {'a': sizes}
-    save(run / 'check.py', CHECK)
     from .groups import assign
 
     with store.connect(draft_path) as db:

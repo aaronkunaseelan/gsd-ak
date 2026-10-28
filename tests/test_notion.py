@@ -34,7 +34,8 @@ DECIDES = [{'ref': 'gmail:synthetic', 'role': 'decides', 'excerpt': 'Synthetic d
 
 class FakeNotion:
     def __init__(self):
-        self.schemas = {table: notion.expected_schema(table) for table in notion.FIELDS}
+        self.schemas = {table: notion.expected_schema(table, {t: t for t in notion.FIELDS})
+                        for table in notion.FIELDS}
         self.pages, self.bodies, self.calls = {}, {}, []
         self.versions = []
         self.comments = {'outside': [{'id': 'comment-1', 'rich_text': notion.rich('Keep this')}]}
@@ -264,6 +265,79 @@ class FakeNotion:
         self.server.server_close()
 
 
+class SectionMarkerTests(unittest.TestCase):
+    def test_section_grammar_round_trips_internal_dividers_and_fenced_headings(self):
+        sections = {
+            'Summary': 'Opening\n\n---\n\n# Internal title\n\n```md\n## Fenced\n---\n```',
+            'Project Notes': 'First\n\n---\n\nLast\n\n---',
+            'Tail': 'Ends with a divider\n\n---',
+        }
+        body = notion.markdown(sections)
+        ranges = notion.section_ranges(body)
+        self.assertEqual(set(ranges), set(sections))
+        for heading, value in sections.items():
+            self.assertEqual(ranges[heading], [notion.markdown({heading: value})])
+        self.assertIn('### Internal title', body)
+        self.assertIn('## Fenced', body)
+
+    def test_trailing_page_divider_is_attributable_but_owner_text_after_it_is_not(self):
+        sections = {'Summary': 'S', 'gsd id': 'abc'}
+        body = notion.markdown(sections)
+        self.assertEqual(notion.section_ambiguities(notion.section_ranges(body + '\n\n---'), sections), [])
+        owned = notion.section_ranges(body + '\n\n---\n\nOwner block')
+        self.assertEqual(notion.section_ambiguities(owned, sections), ['gsd id'])
+
+    def test_discussion_wrappers_and_duplicate_normalisation(self):
+        wrapped = '## <span discussion-urls="https://notion.so/discussion">Summary</span>'
+        ranges = notion.section_ranges(wrapped + '\nOld\n\n## Summary\nNew')
+        self.assertEqual(list(ranges), ['Summary'])
+        self.assertEqual(len(ranges['Summary']), 2)
+        self.assertTrue(ranges['Summary'][0].startswith(wrapped))
+        self.assertEqual(notion.section_ranges('```\n' + wrapped + '\n```'), {})
+
+    def test_rewrite_keeps_heading_exactly(self):
+        heading = '## <span discussion-urls="url">Summary</span>  '
+        class Client:
+            def body(self, page):
+                return heading + '\nOld'
+            def update_section(self, page, old, new):
+                self.changed = (old, new)
+                return {}
+        client = Client()
+        notion.update_body(client, 'scratch', {'Summary': 'New'})
+        self.assertEqual(client.changed, (heading + '\nOld', heading + '\n\nNew'))
+
+    def test_find_created_with_commented_identity_heading(self):
+        class Client:
+            def paginate(self, *args):
+                return [{'id': 'scratch'}]
+            def body(self, page):
+                return '## <span discussion-urls="url">gsd id</span>\n\nr1'
+            def request(self, *args):
+                return {'id': 'scratch', 'properties': {}}
+        page, matched = notion.find_created(Client(), 'source', {'record_id': 'r1'}, {})
+        self.assertEqual(page['id'], 'scratch')
+        self.assertTrue(matched)
+        client = Client()
+        client.body = lambda page: '## gsd id'
+        self.assertEqual(notion.find_created(client, 'source', {'record_id': 'r1'}, {}), (None, False))
+
+
+class DateCanonicalTests(unittest.TestCase):
+    def test_minute_precision_shared_by_encoder_and_readback(self):
+        for value in ('2026-10-27 12:34:56+00', '2026-10-27T14:34:01+02:00',
+                      '2026-10-27T12:34:59.123Z'):
+            expected = notion.encode('date', value)
+            self.assertEqual(expected, {'date': {'start': '2026-10-27T12:34Z'}})
+            self.assertTrue(notion.matches(
+                {'Due': {'type': 'date', 'date': {'start': '2026-10-27T12:34:00.000+00:00'}}},
+                {'Due': expected}))
+        self.assertEqual(notion.canonical_date('2026-10-27'), '2026-10-27')
+        self.assertIsNone(notion.canonical_date(None))
+        self.assertFalse(notion.matches({'Due': notion.encode('date', '2026-10-27T12:35Z')},
+                                       {'Due': notion.encode('date', '2026-10-27T12:34Z')}))
+
+
 class NotionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -465,6 +539,7 @@ class NotionTests(unittest.TestCase):
             'data_source_id': 'items',
             'type': 'dual_property',
         }
+        self.fake.schemas['items']['Project']['relation']['data_source_id'] = 'people'
         self.fake.query_page_size = 1
         self.fake.calls.clear()
         maps_before = self.mappings()
@@ -940,7 +1015,7 @@ raise SystemExit(cli.main())
         errors = report['schema_differences']['projects']['missing_or_wrong_type']
         self.assertEqual({e['property'] for e in errors}, {'Next Actions', 'Priority'})
         self.assertIn('refused', self.publish())
-        self.assertTrue(all(c[0] == 'GET' for c in self.fake.calls))
+        self.assertFalse(self.remote_writes())
 
     def test_check_without_token_expected_table_and_no_mutation(self):
         self.add('project', {'name': 'Example'})
@@ -951,6 +1026,64 @@ raise SystemExit(cli.main())
         self.assertFalse(self.mappings())
         for table, fields in notion.FIELDS.items():
             self.assertEqual(len(fields), len({f for f, _, _ in fields}), table)
+
+    def test_check_reads_values_duplicates_and_source_inventory(self):
+        rid = self.add('item', {'title': 'Item', 'due_at': '2026-10-27 12:34:56+00'})
+        wrong = self.add('project', {'name': 'Wrong source'})
+        trashed = self.add('person', {'display_name': 'Trash'})
+        gone = self.add('meeting', {'title': 'Gone'})
+        self.publish()
+        maps = self.mappings()
+        page = maps[rid]['page_id']
+        self.fake.pages[page]['properties']['Due'] = {
+            'type': 'date', 'date': {'start': '2026-10-27T12:34:00.000+00:00'}}
+        self.fake.pages[page]['properties']['Name'] = notion.encode('title', 'Remote edit')
+        self.fake.bodies[page] += '\n\n## <span discussion-urls="url">Summary</span>\nDuplicate'
+        self.fake.pages[maps[wrong]['page_id']]['parent']['data_source_id'] = 'items'
+        self.fake.pages[maps[trashed]['page_id']]['in_trash'] = True
+        del self.fake.pages[maps[gone]['page_id']]
+        self.remote_page('orphan', source='people')
+        self.fake.calls.clear()
+        report = self.publish(check=True)
+        self.assertEqual(report['property_differences'], [
+            {'record_id': rid, 'page_id': page, 'properties': ['Name'], 'errors': []}])
+        self.assertEqual(report['duplicate_sections'], [{'page_id': page, 'sections': ['Summary']}])
+        for name, expected in [('unmapped_pages', 'orphan'), ('missing_pages', maps[gone]['page_id']),
+                               ('wrong_source_pages', maps[wrong]['page_id']),
+                               ('trashed_pages', maps[trashed]['page_id'])]:
+            self.assertEqual(report[name][0]['page_id'], expected)
+            self.assertEqual(report['projection_check']['classes'][name]['count'], 1)
+        self.assertEqual(sum(c[0] == 'POST' and c[1].endswith('/query') for c in self.fake.calls), 4)
+        self.assertFalse(self.remote_writes())
+        checks, metrics = notion.projection_telemetry(self.path)
+        self.assertFalse(next(c for c in checks if c['name'] == 'notion_duplicate_sections')['ok'])
+        self.assertTrue(all(len(c['reason']) <= 160 for c in checks))
+        self.assertEqual(len(checks), len(metrics))
+        ledger = (self.path.parent / 'notion-publish.jsonl').read_text().splitlines()[-1]
+        self.assertNotIn('Remote edit', ledger)
+        self.assertIn('projection_check', ledger)
+
+    def test_check_unknown_without_token_or_failed_read(self):
+        checks, metrics = notion.projection_telemetry(self.path)
+        self.assertFalse(checks[0]['ok'])
+        self.assertEqual(metrics, [])
+        self.add('item', {'title': 'Item'})
+        self.publish()
+        self.publish(check=True)
+        self.fake.fail = {'method': 'GET', 'path': '/data_sources/items', 'status': 403}
+        # Schema reads precede reconcile: failures there must not retain a green check.
+        with self.assertRaises(ValueError):
+            self.publish(check=True)
+        checks, _ = notion.projection_telemetry(self.path)
+        self.assertFalse(checks[0]['ok'])
+
+    def test_check_missing_data_source_is_not_healthy(self):
+        with db.connect(self.path, True) as conn:
+            conn.execute("DELETE FROM notion_sources WHERE kind='people'")
+        report = self.publish(check=True)
+        self.assertEqual(report['source_differences'], [{'page_id': 'people'}])
+        checks, _ = notion.projection_telemetry(self.path)
+        self.assertFalse(next(c for c in checks if c['name'] == 'notion_source_differences')['ok'])
 
     def test_check_lists_unreachable_mapped_pages(self):
         kept = self.add('person', {'display_name': 'Kept', 'primary_email': 'kept@example.org'})
@@ -1056,8 +1189,14 @@ raise SystemExit(cli.main())
             '## Sources\n\n_(empty)_', 'Legacy source block'
         )
         self.change('project', rid, {'summary': 'Third'})
+        before_body = self.fake.bodies[page]
         report = self.publish()
-        self.assertEqual(report['appended_sections'], [{'page_id': page, 'sections': ['Sources']}])
+        self.assertEqual(report['appended_sections'], [])
+        self.assertIn('body unchanged', report['pages'][0]['errors'][0])
+        self.assertEqual(self.fake.bodies[page], before_body)
+        self.assertIsNone(self.mappings()[rid]['content_hash'])
+        checked = self.publish(check=True)
+        self.assertEqual(checked['ambiguous_sections'], [{'page_id': page, 'sections': ['Linked items']}])
         self.assertIn('Legacy source block', self.fake.bodies[page])
         self.assertIn(unrelated, self.fake.bodies[page])
         self.assertTrue(notion.probe_comments(self.fake.client, page)['survived'])
@@ -1065,7 +1204,6 @@ raise SystemExit(cli.main())
     def test_unconfirmed_section_no_retry_or_hash_advance(self):
         rid = self.add('project', {'name': 'Example', 'summary': 'Before'})
         self.publish()
-        original_hash = self.mappings()[rid]['content_hash']
         self.change('project', rid, {'summary': 'After'})
         page = self.mappings()[rid]['page_id']
         self.fake.calls.clear()
@@ -1077,10 +1215,107 @@ raise SystemExit(cli.main())
         }
         with self.assertRaisesRegex(ValueError, 'read-back did not confirm'):
             self.publish()
-        self.assertEqual(self.mappings()[rid]['content_hash'], original_hash)
+        self.assertIsNone(self.mappings()[rid]['content_hash'])
         self.assertEqual(
             sum(c[0] == 'PATCH' and c[1].endswith('/markdown') for c in self.fake.calls), 1
         )
+
+    def test_notes_update_preserves_separate_commented_heading(self):
+        rid = self.add('project', {'name': 'Boundary', 'body_markdown': 'Before'})
+        self.publish()
+        page = self.mappings()[rid]['page_id']
+        unrelated = '# <span discussion-urls="synthetic-discussion">Journal</span>\n\nKeep marker'
+        self.fake.bodies[page] = self.fake.bodies[page].replace(
+            '## Project Notes\n\nBefore', '## Project Notes\n\nBefore\n\n---\n\n' + unrelated)
+        self.change('project', rid, {'body_markdown': 'After'})
+        self.publish()
+        self.assertIn(unrelated, self.fake.bodies[page])
+
+    def test_summary_internal_divider_round_trips_without_duplicate_tail(self):
+        text = 'Opening\n\n---\n\nUnique ending'
+        rid = self.add('project', {'name': 'Round trip', 'summary': text, 'body_markdown': text})
+        self.publish()
+        page = self.mappings()[rid]['page_id']
+        self.assertEqual(self.fake.bodies[page].count('Unique ending'), 2)
+        before = self.fake.bodies[page]
+        self.change('project', rid, {'summary': text + ' updated'})
+        report = self.publish()
+        self.assertIn('body unchanged', report['pages'][0]['errors'][0])
+        self.assertEqual(self.fake.bodies[page], before)
+        self.assertEqual(self.fake.bodies[page].count('Unique ending'), 2)
+        self.assertIn(text, self.fake.bodies[page])
+
+    def test_date_readback_compares_range_end_and_timezone(self):
+        expected = {'Due': notion.encode('date', '2026-10-28')}
+        for end, zone in [('2026-11-01', None), (None, 'Europe/Athens')]:
+            actual = {'Due': {'date': {'start': '2026-10-28', 'end': end, 'time_zone': zone}}}
+            self.assertFalse(notion.matches(actual, expected))
+        self.assertTrue(notion.matches(
+            {'Due': {'date': {'start': '2026-10-28', 'end': None, 'time_zone': None}}}, expected))
+
+    def test_wrong_relation_target_refuses_all_page_writes(self):
+        self.add('item', {'title': 'Example'})
+        self.fake.schemas['items']['Project']['relation'] = {'data_source_id': 'people'}
+        _, differences = notion.publish_schemas(self.fake.client, {t: t for t in notion.FIELDS})
+        self.assertTrue(differences['items']['missing_or_wrong_type'])
+        report = self.publish()
+        self.assertIn('refused', report)
+        self.assertEqual(self.remote_writes(), [])
+
+    def test_expired_projection_check_is_unknown(self):
+        self.publish(check=True)
+        log = self.path.parent / 'notion-publish.jsonl'
+        entry = json.loads(log.read_text().splitlines()[-1])
+        entry['timestamp'] = '2000-01-01T00:00:00Z'
+        log.write_text(json.dumps(entry) + '\n')
+        checks, metrics = notion.projection_telemetry(self.path)
+        self.assertFalse(checks[0]['ok'])
+        self.assertIn('unknown:', checks[0]['reason'])
+        self.assertEqual(metrics, [])
+
+    def test_check_reports_never_published_record(self):
+        rid = self.add('project', {'name': 'Not yet published'})
+        report = self.publish(check=True)
+        self.assertEqual(report['plan']['project:create'], 1)
+        checks, _ = notion.projection_telemetry(self.path)
+        self.assertTrue(any(not row['ok'] for row in checks))
+        self.assertEqual(report['missing_pages'][0]['record_id'], rid)
+
+    def test_check_reports_pending_tombstone_archive(self):
+        rid = self.add('project', {'name': 'Pending deletion'})
+        self.publish()
+        self.tombstone(rid)
+        report = self.publish(check=True)
+        self.assertEqual(report['plan']['archive'], 1)
+        checks, _ = notion.projection_telemetry(self.path)
+        self.assertTrue(any(not row['ok'] for row in checks))
+        self.assertEqual(report['pending_archives'][0]['record_id'], rid)
+        self.publish()
+        report = self.publish(check=True)
+        self.assertEqual(report['pending_archives'], [])
+        self.assertTrue(all(row['ok'] for row in notion.projection_telemetry(self.path)[0]))
+
+    def failed_ordinary_update(self):
+        rid = self.add('project', {'name': 'Partial', 'priority': 1, 'summary': 'A'})
+        self.publish()
+        page = self.mappings()[rid]['page_id']
+        self.change('project', rid, {'priority': 2, 'summary': 'B'})
+        self.fake.incomplete_bodies.add(page)
+        with self.assertRaisesRegex(ValueError, 'incomplete'):
+            self.publish()
+        self.fake.incomplete_bodies.clear()
+        return rid, page
+
+    def test_partial_update_invalidates_completed_hash(self):
+        rid, _ = self.failed_ordinary_update()
+        self.assertIsNone(self.mappings()[rid]['content_hash'])
+        self.assertIsNone(self.mappings()[rid]['body_hash'])
+
+    def test_graph_reversion_repairs_partially_updated_remote(self):
+        rid, page = self.failed_ordinary_update()
+        self.change('project', rid, {'priority': 1, 'summary': 'A'})
+        self.publish()
+        self.assertEqual(self.fake.pages[page]['properties']['Priority']['number'], 1)
 
     def test_partial_pass_two_keeps_confirmed_identity_null_hash(self):
         owner = self.add('person', {'display_name': 'Owner'})
@@ -1103,12 +1338,13 @@ raise SystemExit(cli.main())
         self.assertFalse(any(c[:2] == ('POST', '/pages') for c in self.fake.calls))
         self.assertTrue(self.mappings()[rid]['content_hash'])
 
-    def test_unconfirmed_create_stops_after_readback_no_mapping(self):
-        self.add('project', {'name': 'Example'})
+    def test_unconfirmed_create_stops_after_readback_with_pending_identity(self):
+        rid = self.add('project', {'name': 'Example'})
         self.fake.fail = {'method': 'POST', 'path': '/pages', 'status': 503, 'apply': False}
         with self.assertRaisesRegex(ValueError, 'no create retry attempted'):
             self.publish()
-        self.assertFalse(self.mappings())
+        self.assertIsNone(self.mappings()[rid]['page_id'])
+        self.assertIsNone(self.mappings()[rid]['content_hash'])
         self.assertEqual(sum(c[:2] == ('POST', '/pages') for c in self.fake.calls), 1)
         self.assertTrue(
             any(c[:2] == ('POST', '/data_sources/projects/query') for c in self.fake.calls)

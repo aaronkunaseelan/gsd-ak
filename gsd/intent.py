@@ -13,6 +13,8 @@ from .runs import outcome
 
 from . import owner
 
+FLOW_DAYS = 31
+
 
 def when(value):
     if not value:
@@ -151,9 +153,12 @@ def document(path, now):
         })
     rows.sort(key=lambda r: (-r['you'], -r['past_due'], -(r['you'] + r['agents'] + r['others'])))
 
-    since = owner.get('flow_since')
-    days, day = [], datetime.fromisoformat(since).replace(tzinfo=owner.zone())
-    while day.date() <= now.astimezone(owner.zone()).date() and len(days) < 31:
+    today = now.astimezone(owner.zone()).date()
+    first = max(datetime.fromisoformat(owner.get('flow_since')).date(),
+                today - timedelta(days=FLOW_DAYS - 1))
+    since = first.isoformat()
+    days, day = [], datetime.combine(first, datetime.min.time(), tzinfo=owner.zone())
+    while day.date() <= today:
         end = day + timedelta(days=1)
         events = [row for at, row in transitions if day <= at < end]
         made = sum(row['is_open'] and not row['was_open'] for row in events)

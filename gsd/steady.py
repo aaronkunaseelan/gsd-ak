@@ -266,6 +266,7 @@ def run(path):
         'weighted_tokens': 0,
         'minutes': 0,
         'published': [],
+        'notion': 'skipped (finalisation not reached)',
     }
 
     def terminate(signum, frame):
@@ -360,14 +361,27 @@ def run(path):
                     config / 'notion-check-reviewed'
                 ).is_file():
                     def publish_notion():
+                        record['notion'] = 'failed'
                         result = own_command(['publish', 'notion', '--db', str(path)])
                         report = json.loads(result.stdout)
                         if report.get('refused') or any(page['errors'] for page in report['pages']):
                             raise ValueError(
                                 'Notion projection incomplete; inspect publish notion --check privately'
                             )
+                        record['notion'] = 'published'
+                        from .notion import projection_check_due
+                        if projection_check_due(path, datetime.now(UTC)):
+                            checking = time.monotonic()
+                            try:
+                                own_command(['publish', 'notion', '--check', '--db', str(path)])
+                            finally:
+                                record['counts']['notion_check_seconds'] = time.monotonic() - checking
 
                     sinks.append(('publish notion', publish_notion))
+                else:
+                    missing = [name for name in ('notion.token', 'notion-check-reviewed')
+                               if not (config / name).is_file()]
+                    record['notion'] = 'skipped (missing ' + ', '.join(missing) + ')'
                 for name, sink in sinks:
                     if record['terminated']:
                         break

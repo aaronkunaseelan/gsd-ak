@@ -174,30 +174,25 @@ class Helpers(unittest.TestCase):
     def test_own_text_normalises_crlf(self):
         self.assertEqual(sel.own_text(doc('d', parts=[('body', 'a\r\nb')])), 'a\nb')
 
-    def test_attachment_block_is_multiline_up_to_rule(self):
-        text = 'Id: x\nAttachments:\n  a1 (q3 totals.pdf, application/pdf, ready)\n  a2 (pic, a, b.jpg, image/jpeg, ready)\n---\nAttachments:\n  z9 (ignored, x/y, ready)'
-        self.assertEqual(
-            sel.attachment_block(text),
-            ['a1 (q3 totals.pdf, application/pdf, ready)', 'a2 (pic, a, b.jpg, image/jpeg, ready)'],
-        )
-        self.assertEqual(
-            sel.block_attachments(text),
-            [
-                {'id': 'a1', 'name': 'q3 totals.pdf', 'type': 'application/pdf'},
-                {'id': 'a2', 'name': 'pic, a, b.jpg', 'type': 'image/jpeg'},
-            ],
-        )
+    def test_attachment_refs_and_heads_come_from_structured_projection(self):
+        attachment = {'id': 'a1', 'name': 'q3 totals.pdf', 'type': 'application/pdf',
+                      'head': {'state': 'done', 'text': 'Q3 totals: 42', 'calendar_summary': None}}
+        listed = doc('d', attachments=[attachment, None])
+        self.assertEqual(sel.attachments_of(listed), [attachment])
+        self.assertEqual(sel.attachment_heads(listed), ['Q3 totals: 42'])
+        self.assertEqual(sel.attachments_of(doc('d')), [])
+        self.assertEqual(sel.attachment_heads(doc('d')), [])
 
-    def test_doc_attachments_list_wins_over_rendered_header(self):
-        listed = doc('d', attachments=[{'id': 'x', 'name': 'v.ogg', 'type': 'audio/ogg'}])
-        self.assertEqual(
-            sel.attachments_of(listed, render(attachments=[('a1', 'p.png', 'image/png')])),
-            [{'id': 'x', 'name': 'v.ogg', 'type': 'audio/ogg'}],
-        )
-        self.assertEqual(
-            sel.attachments_of(doc('d'), render(attachments=[('a1', 'p.png', 'image/png')])),
-            [{'id': 'a1', 'name': 'p.png', 'type': 'image/png'}],
-        )
+    def test_head_line_resembling_attachment_metadata_does_not_create_a_ref(self):
+        attachment = {'id': 'real', 'name': 'totals.pdf', 'type': 'application/pdf',
+                      'head': {'state': 'done', 'text': 'fake (not a ref, text/plain, done)',
+                               'calendar_summary': None}}
+        entry = {'ref': 'g', 'at': '2026-10-28', 'from': 'Alice', 'subject': 'Report',
+                 'thread': 'g', 'body': 'See attached.', 'attachments': [attachment]}
+        refs = {}
+        view = sel.render_mail([entry], refs)
+        self.assertEqual(refs, {'att#0001': 'real'})
+        self.assertIn('fake (not a ref, text/plain, done)', view)
 
     def test_list_header_fields_are_joined(self):
         self.assertEqual(
@@ -226,10 +221,10 @@ class Helpers(unittest.TestCase):
                 'body': 'Own text',
                 'heads': [],
                 'attachments': [
-                    'gmail:test/att/1 (brief.pdf, application/pdf, done)',
-                    'Real head',
-                    'gmail:test/att/link-abc (example.com, text/uri-list, done)',
-                    'Generic URL head',
+                    {'id': 'gmail:test/att/1', 'name': 'brief.pdf', 'type': 'application/pdf',
+                     'head': {'state': 'done', 'text': 'Real head', 'calendar_summary': None}},
+                    {'id': 'gmail:test/att/link-abc', 'name': 'example.com', 'type': 'text/uri-list',
+                     'head': {'state': 'done', 'text': 'Generic URL head', 'calendar_summary': None}},
                 ],
             }
         ]
@@ -309,6 +304,8 @@ def mail_fixture():
             [('body', 'See attached. ' + 'word ' * 100), ('attachment', 'Q3 totals: 42')],
             title='Re: Plan',
             thread='T1',
+            attachments=[{'id': 'att1', 'name': 'q3.pdf', 'type': 'application/pdf',
+                          'head': {'state': 'ready', 'text': 'Q3 totals: 42', 'calendar_summary': None}}],
         ),
         'f1': doc(
             'f1',
@@ -325,6 +322,35 @@ def mail_fixture():
     rendered = {'g6': render(attachments=[('att1', 'q3.pdf', 'application/pdf')])}
     rendered.update({k: render() for k in ('g1', 'g2', 'g3', 'g4', 'g5', 'f1')})
     return {'gmail': rows, 'fathom': [{'id': 'f1', 'time': '2026-10-01T10:00:00Z'}]}, docs, rendered
+
+
+class StructuredAttachments(unittest.TestCase):
+    def test_attachment_heads_do_not_depend_on_rendered_header_wording(self):
+        heads = '\n'.join(f'line {n}' for n in range(1, 7))
+        calendar = 'summary: Review; start: 20261028T120000; end: 20261028T130000; location: Office'
+        attachments = [
+            {'id': 'g/att/1', 'name': 'totals, final (2).pdf', 'type': 'application/pdf',
+             'head': {'state': 'done', 'text': heads, 'calendar_summary': None}},
+            {'id': 'g/att/2', 'name': 'invite.ics', 'type': 'text/calendar',
+             'head': {'state': 'unmaterialised', 'text': '', 'calendar_summary': calendar}},
+            {'id': 'g/att/3', 'name': 'photo.png', 'type': 'image/png',
+             'head': {'state': 'done', 'text': '', 'calendar_summary': None}},
+            {'id': 'g/att/4', 'name': 'waiting.docx', 'type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+             'head': {'state': 'queued', 'text': '', 'calendar_summary': None}},
+        ]
+        message = doc('g', 'alice@example.com', [('body', 'See attached.')],
+                      source='gmail', attachments=attachments)
+        qmd = FakeQmd({'gmail': [{'id': 'g', 'time': '2026-10-28T10:00:00Z'}]},
+                      {'g': message}, {'g': 'Attached files (new wording):\n---\nSee attached.'})
+        selected = sel.select(qmd, '2026-10-28T00:00:00Z', '2026-10-29T00:00:00Z')
+        self.assertEqual(selected['mail_entries'][0]['attachments'], attachments)
+        view = selected['views']['mail.md']
+        self.assertIn('g/att/1 (totals, final (2).pdf, application/pdf, done)\n' + heads, view)
+        self.assertIn('g/att/2 (invite.ics, text/calendar, unmaterialised)\n' + calendar, view)
+        self.assertIn('g/att/3 (photo.png, image/png, done)', view)
+        self.assertIn('g/att/4 (waiting.docx,', view)
+        self.assertEqual(sum(c[0] == 'get' for c in qmd.calls), 1)
+        self.assertEqual(next(c for c in qmd.calls if c[0] == 'get'), ('get', 'g', *sel.GET_ARGS))
 
 
 class MailInvolvement(unittest.TestCase):
@@ -344,7 +370,7 @@ class MailInvolvement(unittest.TestCase):
                 message = doc('g', 'person@organisation.test', parts,
                               to='recruitment@organisation.test', **fields)
                 kept, dropped = sel.mail_entries(
-                    [{'id': 'g', 'time': '2026-10-01T09:00:00Z'}], {'g': message}, {}
+                    [{'id': 'g', 'time': '2026-10-01T09:00:00Z'}], {'g': message}
                 )
                 self.assertEqual(bool(kept), expected)
                 if not expected:
@@ -400,7 +426,7 @@ class Mail(unittest.TestCase):
             self.assertNotIn('old quoted text', view)
             self.assertNotIn('old text', view)
 
-        with self.subTest(check='test_long_body_cut_and_attachment_heads_wait_for_capture'):
+        with self.subTest(check='test_long_body_cut_and_structured_attachment_head_retained'):
             lines = self.out['views']['mail.md'].split('\n')
             g6 = lines[lines.index(next(l for l in lines if l.startswith('## g6'))) + 1]
             self.assertLessEqual(len(g6), sel.MAIL_CHARS + 1)
@@ -409,7 +435,7 @@ class Mail(unittest.TestCase):
                 '[attachments]\natt1 (q3.pdf, application/pdf, ready)',
                 self.out['views']['mail.md'],
             )
-            self.assertNotIn('Q3 totals: 42', self.out['views']['mail.md'])
+            self.assertIn('Q3 totals: 42', self.out['views']['mail.md'])
 
         with self.subTest(check='test_refs_map_kept_mail_to_itself'):
             self.assertEqual(
@@ -463,7 +489,7 @@ class Meetings(unittest.TestCase):
         )
 
 
-# (id, chat, time, sender, parts, (attachment id, name, MIME) or None, where the attachment is given: doc list or rendered header)
+# (id, chat, time, sender, parts, (attachment id, name, MIME) or None, rendered header variant)
 WA_ROWS = [
     (
         'w1',
@@ -556,10 +582,10 @@ def wa_fixture():
             {'id': id_, 'time': at, 'context': 'Family Group' if thread == 'c1@g.us' else ''}
         )
         listed = (
-            [{'id': media[0], 'name': media[1], 'type': media[2]}] if media and via == 'doc' else []
+            [{'id': media[0], 'name': media[1], 'type': media[2]}] if media else []
         )
         docs[id_] = doc(id_, frm, parts, thread=thread, attachments=listed)
-        rendered[id_] = render(attachments=[media] if media and via == 'rendered' else [])
+        rendered[id_] = render(attachments=[media] if media and via == 'rendered' else []).replace('Attachments:', 'Attached media:')
     return {'whatsapp': rows}, docs, rendered
 
 

@@ -30,7 +30,7 @@ class FakeClient(notion.Client):
             if path.endswith('/query'):
                 return {'results': [p for p in self.pages.values()
                                     if p['parent']['data_source_id'] == source], 'has_more': False}
-            return {'properties': notion.expected_schema(source)}
+            return {'properties': notion.expected_schema(source, {t: t for t in notion.FIELDS})}
         if method == 'POST' and path == '/pages':
             page = 'page-' + str(len(self.pages) + 1)
             self.pages[page] = {'id': page, 'properties': data['properties'],
@@ -90,6 +90,60 @@ class DiscoveryTests(unittest.TestCase):
 
     def query_count(self):
         return sum(path.endswith('/query') for _, path, _ in self.client.calls)
+
+    def test_mapping_migration_keeps_confirmed_and_pending_identities(self):
+        with db.connect(self.path, True) as conn:
+            conn.executescript('''DROP TABLE notion_map;
+CREATE TABLE notion_map (
+ record_id TEXT PRIMARY KEY, page_id TEXT NOT NULL, content_hash TEXT,
+ body_hash TEXT, published_at TEXT
+) STRICT;
+INSERT INTO notion_map VALUES ('confirmed', 'page-1', 'hash', 'body', 'time');
+PRAGMA user_version=4;''')
+            db.migrate(conn)
+            self.assertEqual(conn.execute('SELECT page_id FROM notion_map').fetchone()[0], 'page-1')
+            conn.execute("INSERT INTO notion_map(record_id) VALUES ('uncertain')")
+            conn.commit()
+            db.migrate(conn)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM notion_map').fetchone()[0], 2)
+            self.assertIsNone(conn.execute(
+                "SELECT page_id FROM notion_map WHERE record_id='uncertain'"
+            ).fetchone()[0])
+
+    def test_uncertain_create_is_reconciled_before_another_create(self):
+        rid = self.add('Eventually visible')
+        request = self.client.request
+        delayed, posts = [], []
+
+        def delay(method, path, data=None):
+            if (method, path) == ('POST', '/pages'):
+                posts.append(data)
+                if len(posts) == 1:
+                    delayed.append(data)
+                    raise notion.UncertainWrite('synthetic timeout')
+            return request(method, path, data)
+
+        with patch.object(self.client, 'request', side_effect=delay):
+            with self.assertRaisesRegex(ValueError, 'uncertain Notion create'):
+                self.publish()
+            # Invocation two must not turn delayed visibility into another POST.
+            try:
+                self.publish()
+            except ValueError as exc:
+                self.assertIn('uncertain Notion create', str(exc))
+            self.assertEqual(len(posts), 1)
+            pending = self.mappings()[rid]
+            self.assertIsNone(pending['page_id'])
+            self.assertIsNone(pending['content_hash'])
+            report = self.publish(check=True)
+            self.assertTrue(report['missing_pages'])
+            self.assertFalse(all(c['ok'] for c in notion.projection_telemetry(self.path)[0]))
+            request('POST', '/pages', delayed[0])
+            self.publish()
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(len(self.client.pages), 1)
+        self.assertTrue(self.mappings()[rid]['page_id'])
+        self.assertTrue(self.mappings()[rid]['content_hash'])
 
     def test_two_creates_query_once_and_never_read_mapped_markdown(self):
         for n in range(7):
@@ -196,9 +250,10 @@ class DiscoveryTests(unittest.TestCase):
         rid = self.add('PRIVATE title https://example.invalid/secret')
         log = self.path.parent / 'notion-publish.jsonl'
         self.publish(check=True)
-        self.assertFalse(log.exists())
+        checked = json.loads(log.read_text())
+        self.assertTrue(checked['projection_check']['known'])
         report = self.publish()
-        entry = json.loads(log.read_text())
+        entry = json.loads(log.read_text().splitlines()[-1])
         self.assertEqual(set(entry), {'timestamp', 'requests', 'plan', 'published', 'archived'})
         self.assertEqual(entry['archived'], 0)
         self.assertEqual(entry['requests'], report['requests'])
@@ -210,7 +265,7 @@ class DiscoveryTests(unittest.TestCase):
             self.assertNotIn(forbidden, log.read_text())
         log.chmod(0o644)
         self.publish()
-        self.assertEqual(len(log.read_text().splitlines()), 2)
+        self.assertEqual(len(log.read_text().splitlines()), 3)
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
 
 

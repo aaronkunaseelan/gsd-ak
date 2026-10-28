@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sqlite3
+import sys
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -12,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gsd import capture, db as store, draft, feed, inbox, intent, selection, status_page, step, tags, worklist, write
 from test_selection import FakeQmd, doc, render
 from test_inbox import comment
@@ -236,6 +238,24 @@ class Review(unittest.TestCase):
         return {'blocks': [
             {'kind': 'stock', 'open': 0, 'you': 0, 'past_due': 0, 'due_7d': 0, 'fresh_through': None},
             {'kind': 'rows', 'items': []}, {'kind': 'chain', 'hops': []}]}
+
+    def test_steward_intent_requires_the_complete_owned_envelope(self):
+        valid = {'schema': 'intent/1', 'system': 'steward', 'state': 'green',
+                 'at': 1793188800, 'headline': 'No planned jobs', 'blocks': [
+                     {'kind': 'runs', 'layer': 'process', 'items': []},
+                     {'kind': 'schedule', 'layer': 'process', 'now': '2026-10-28T12:00:00Z',
+                      'window_h': 24, 'items': []}]}
+        def view(payload):
+            reply = subprocess.CompletedProcess('steward', 0, json.dumps(payload), '')
+            with patch.object(status_page.subprocess, 'run', return_value=reply):
+                return status_page.steward_view()
+        self.assertEqual(view(valid), {'runs': [], 'next': None})
+        for bad in ({k: v for k, v in valid.items() if k != 'headline'},
+                    {**valid, 'headline': None},
+                    {**valid, 'blocks': [{'kind': kind, 'layer': 'process', 'items': []}
+                                        for kind in ('runs', 'schedule')]}):
+            with self.subTest(bad=bad):
+                self.assertIsNone(view(bad))
 
     def test_gsd_rejects_a_schema_less_steward_view(self):
         for malformed in ({'blocks': []}, {'schema': 'intent/1', 'system': 'other', 'state': 'green', 'at': 1, 'blocks': []}):

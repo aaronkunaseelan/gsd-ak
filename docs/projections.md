@@ -46,8 +46,18 @@ No live API call or live-store write was made during this build.
   create/update/unchanged counts, schema differences and source configuration.
   Without a token it explicitly uses the expected schema in `gsd/notion.py: FIELDS`;
   this is not a remote reconcile. With credentials it reads each data-source schema,
-  mapped page edit times (since 6 Aug), and section markers. Public REST does not
-  expose database automation rules: the owner must inspect these manually.
+  mapped page edit times (since the configured import cutoff), canonical property
+  values, missing/duplicate section markers and the data-source inventory. Body
+  bytes are not compared: Notion normalizes Markdown. Checks hold the publish lock
+  and append bounded counts/ids (never values or bodies) to the existing
+  `notion-publish.jsonl` ledger. The inbox's existing telemetry/1 output carries
+  the latest check's counts, sample ids and observation time; no check or a failed
+  check is unknown/red, as is an observation older than
+  `notion.PROJECTION_CHECK_MAX_AGE`. The morning steady checks after publishing,
+  once per local day (the publication ledger owns the last observation), and
+  records the added time as `counts.notion_check_seconds`. Steward schedules
+  steady; each publish/check child takes the existing Notion lock. Public REST does not expose
+  database automation rules: the owner must inspect these manually.
 - `gsd publish notion --db FILE` now has a working coordinator. Remote writes require
   **both** `~/.config/gsd/notion.token` (nonempty, mode 600) and
   `~/.config/gsd/notion-check-reviewed`. An environment token alone cannot open this
@@ -76,7 +86,9 @@ names/emails, not JSON. Meeting action columns render within Meeting Notes, not
 separate action properties. Exact meeting timing/logistics are property-only;
 When is the starting calendar date. Project/item Next Actions are property-only,
 with em-dash bullets for multiple lines. Notes preserve canonical markdown except
-H1/H2 headings are demoted outside code fences. No managed child database is rebuilt.
+H1/H2 headings are demoted outside code fences in every generated section, using
+`notion.markdown_lines`/`markdown`. H1/H2 headings delimit sections; internal
+dividers are content, not Notes-specific boundaries. No managed child database is rebuilt.
 
 At runtime the data-source schema chooses the REST encoder: title, rich_text,
 select/status, multi_select, date, number, url, email, checkbox or relation. People
@@ -92,7 +104,10 @@ by kind, like other records; no separate databases or implicit routing are creat
 Each run renders all records, hashes values/body/live property types, then plans.
 Pass 1 creates missing identities **without relations**, updates non-relation
 properties, and edits body sections. Pass 2 encodes relation record IDs as confirmed
-page IDs. A confirmed create saves its mapping immediately with null hashes; final
+page IDs. An attempted create saves a null page identity before its POST; uncertain outcomes
+remain in `notion_map` for discovery on later publishes, never another automatic
+create. `db.migrate` upgrades the auxiliary mapping to permit this pending identity.
+A confirmed create saves its page identity immediately with null hashes; final
 hashes advance per page only after both passes succeed. A later failure therefore
 leaves earlier confirmed pages durable and incomplete pages eligible for completion.
 There is no outbox. An unchanged hash performs no page writes.
@@ -105,6 +120,11 @@ PATCH /v1/pages/{id}/markdown
 ```
 
 Headings are section markers; duplicate markers or incomplete markdown fail closed.
+An interior divider in a section whose content differs from its desired canonical
+rendering is ambiguous: it might hide an unheaded owner block or a missing marker.
+The entire page body stays unchanged and its completion hashes stay null; page
+errors and `--check`'s `ambiguous_sections` findings name the sections. Exact
+canonical sections with legitimate internal dividers round-trip unchanged.
 Missing sections are appended using `insert_content` at the end and listed in
 `appended_sections` (also predicted by a token-backed check). Unrelated headings,
 blocks and managed child databases are not replaced. Emptying previously rendered

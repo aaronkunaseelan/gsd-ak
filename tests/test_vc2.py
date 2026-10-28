@@ -22,8 +22,9 @@ class Evidence(unittest.TestCase):
                     fcntl.flock(lock, fcntl.LOCK_EX)
                     inbox.pull(path)
                 doc = json.loads(signal.read_text())
-                self.assertEqual(doc['state'], 'green')
+                self.assertEqual(doc['state'], 'red')  # No projection check is unknown, not green.
                 self.assertTrue(doc['checks'][0]['reason'].startswith('busy:'))
+                self.assertIn('no publish notion --check recorded', doc['checks'][-1]['reason'])
                 with inbox.connect(path) as db:
                     inbox.put(db, 'backoff_until', str(time.time() + 600))
                 inbox.pull(path)

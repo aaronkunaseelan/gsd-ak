@@ -1,7 +1,6 @@
 """Fixed-order packet blocks; graph/window bytes are identical across the relay."""
 
 import json
-import shlex
 import textwrap
 from . import db as store
 from . import owner
@@ -333,12 +332,10 @@ def packet(
             if restate
             else f"Propose this window into the draft; finish {run / 'open.md'}."
         )
-        check = ['python3', '-I', str(run / 'check.py'), name]
     else:
         task = f"Review group {group}; decide every change in it; write notes-{group}.md."
-        check = ['python3', '-I', str(run / 'check.py'), group]
-    # Shared material precedes the first role-dependent byte: A and all relay
-    # reviewers reuse the graph/window prefix, not merely the short contract.
+    # Only trusted instructions belong in the appended system prompt. Graph
+    # and source evidence remain user data, including through the review relay.
     blocks = [
         ('contract', contract() + ('\n' + TAG_CONTRACT if tagged else '')),
         ('graph view', graph),
@@ -349,10 +346,10 @@ def packet(
     ]
     if restate:
         blocks = [b for b in blocks if b[0] != 'sparse window']
-    boundary = 2 if restate else 3
+    boundary = 1
     shared = '\n\n'.join(f'# {name}\n\n{value}' for name, value in blocks[:boundary])
     user = '\n\n'.join(f'# {name}\n\n{value}' for name, value in blocks[boundary:])
-    user += '\n\nacceptance: run ' + shlex.join(check) + '\n'
+    user += '\n\nThe runner independently checks the draft and required notes after you finish.\n'
     text = shared + '\n\n' + user
     sizes = {name: {'chars': len(value), 'approx_tokens': len(value) / 4} for name, value in blocks}
     for name, value in [('shared', shared), ('per-agent', user), ('packet', text)]:

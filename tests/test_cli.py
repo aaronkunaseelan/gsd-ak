@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,12 +19,25 @@ from gsd import draft, write
 
 
 class CLI(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        seed_tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(seed_tmp.cleanup)
+        cls.seed = Path(seed_tmp.name) / 'seed.sqlite'
+        conn = sqlite3.connect(cls.seed)
+        try:
+            store.migrate(conn)
+        finally:
+            # Close/checkpoint before copying; every test gets its own WAL store.
+            conn.close()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
         self.db = self.base / 'base.sqlite'
-        self.run_cli('migrate')
+        # Migration through the CLI is exercised by the schema migration test.
+        shutil.copyfile(self.seed, self.db)
 
     def run_cli(self, *args, data=None, path=None, ok=True):
         env = dict(os.environ)
@@ -76,6 +90,9 @@ class CLI(unittest.TestCase):
         return self.run_cli('show', rid, path=path)[0]
 
     def test_schema_migration_matches_fresh_and_is_idempotent(self):
+        # Keep creation of a fresh store on the real CLI path as well as upgrades.
+        self.db.unlink()
+        self.run_cli('migrate')
         old = self.base / 'old.sqlite'
         schema = (ROOT / 'schema.sql').read_text().split('-- D7:')[0]
         with sqlite3.connect(old) as db:
@@ -519,6 +536,24 @@ class CLI(unittest.TestCase):
         self.assertIn('set project_id', refused[0]['errors'][0]['why'])
         self.assertIn('set assigned_to', refused[1]['errors'][0]['why'])
         self.assertEqual(self.run_cli('status', path=d)['changes'], [])
+
+    def test_literal_newlines_rejected_at_write_boundary(self):
+        with store.connect(self.db, True) as db:
+            for kind, fields in [
+                ('item', {'title': 'X', 'body_markdown': r'### Details\nText'}),
+                ('project', {'name': 'X', 'summary': r'one\ntwo'}),
+                ('meeting', {'title': 'X', 'body_markdown': r'one\ntwo'}),
+                ('person', {'display_name': 'X', 'metadata_json': json.dumps({'note': r'one\ntwo'})}),
+            ]:
+                result = write.batch(db, {'changes': [{'ops': [{'upsert': kind, 'set': fields}]}]})[0]
+                self.assertFalse(result['ok'], result)
+                self.assertIn('literal backslash-n', str(result['errors']))
+        rid = self.item(body_markdown='one\ntwo')
+        self.assertEqual(self.show(rid)['fields']['body_markdown'], 'one\ntwo')
+        with store.connect(self.db, True) as db:
+            result = write.batch(db, {'changes': [{'ops': [{'upsert': 'person', 'set': {
+                'display_name': 'X', 'metadata_json': json.dumps({'note': 'one\ntwo'})}}]}]})[0]
+            self.assertTrue(result['ok'], result)
 
     def test_validation_tables_and_shapes(self):
         cases = [

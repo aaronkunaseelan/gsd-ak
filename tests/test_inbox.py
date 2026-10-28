@@ -108,6 +108,23 @@ class Inbox(unittest.TestCase):
         conn = inbox.connect(self.path)
         return {r['id']: dict(r) for r in conn.execute('SELECT * FROM comments')}
 
+    def test_projection_findings_reach_existing_telemetry(self):
+        notion.publish_log(self.path, {'requests': None, 'plan': {}, 'projection_check': {
+            'known': True, 'classes': {'duplicate_sections': {'count': 2, 'ids': ['p1', 'p2']}}}})
+        inbox.telemetry({'status': 'busy'}, NOW.timestamp(), self.path)
+        payload = json.loads(inbox.TELEMETRY.read_text())
+        self.assertEqual(payload['state'], 'red')
+        check = next(c for c in payload['checks'] if c['name'] == 'notion_duplicate_sections')
+        self.assertIn('p1,p2', check['reason'])
+        self.assertEqual(payload['metrics'][-1]['value'], 2)
+        # A later ordinary publish must not erase the last check.
+        notion.publish_log(self.path, {'requests': None, 'plan': {}})
+        self.assertEqual(notion.projection_telemetry(self.path)[1][-1]['value'], 2)
+        notion.publish_log(self.path, {'requests': None, 'plan': {}, 'projection_check': {
+            'known': False, 'reason': 'remote read failed'}})
+        inbox.telemetry({'status': 'busy'}, NOW.timestamp(), self.path)
+        self.assertIn('unknown', json.loads(inbox.TELEMETRY.read_text())['checks'][-1]['reason'])
+
     def test_page_level_comments_sweep_daily_and_edits_come_back(self):
         self.client.comments = {'root': [comment('c1', page='root')], 'p1': [comment('c2', page='p1')]}
         self.assertEqual(self.read(), {'pages': 3, 'new': 2, 'swept': True})

@@ -104,7 +104,7 @@ def read_comments(client, gdb, db, started, sweep=False):
     if not sweep and last and started - when(last) < SWEEP:
         return {'pages': 0, 'new': 0, 'swept': False}
     root = root_page(client, gdb, db)
-    pages = [r[0] for r in gdb.execute('SELECT page_id FROM notion_map')]
+    pages = [r[0] for r in gdb.execute('SELECT page_id FROM notion_map WHERE page_id IS NOT NULL')]
     now, found = store.now(), 0
     for page in dict.fromkeys([root, *pages]):
         for comment in client.paginate(f'/comments?block_id={page}&page_size=100'):
@@ -182,7 +182,7 @@ def clear(client, gdb, db, cut):
             client.request('DELETE', f'/blocks/{old}')
         mark(db, old, 'cleared ' + store.now(), consumed)
         put(db, 'clearing', None)
-    owned = {r[0] for r in gdb.execute('SELECT page_id FROM notion_map')}
+    owned = {r[0] for r in gdb.execute('SELECT page_id FROM notion_map WHERE page_id IS NOT NULL')}
     blocks = db.execute(
         'SELECT DISTINCT block_id, page_id FROM comments WHERE block_id IS NOT NULL AND cleared IS NULL AND seen_at <= ?',
         (cut,),
@@ -238,7 +238,7 @@ def window(selected, path, since, until):
     if not rows:
         return
     with store.connect(path) as gdb:
-        records = {r['page_id']: r['record_id'] for r in gdb.execute('SELECT record_id, page_id FROM notion_map')}
+        records = {r['page_id']: r['record_id'] for r in gdb.execute('SELECT record_id, page_id FROM notion_map WHERE page_id IS NOT NULL')}
         titles = {}
         for kind, table, column in (('item', 'cur_items', 'title'), ('project', 'cur_projects', 'name'),
                                     ('person', 'cur_people', 'display_name'), ('meeting', 'cur_meetings', 'title')):
@@ -264,7 +264,7 @@ def window(selected, path, since, until):
     selected['comments'] = len(rows)
 
 
-def telemetry(result, now):
+def telemetry(result, now, path):
     checks = [
         {'name': 'pass', 'ok': result['status'] in ('ok', 'busy'),
          'reason': result.get('reason') or result['status']}, 
@@ -279,6 +279,9 @@ def telemetry(result, now):
         # No operation was attempted; the pass verdict explains the deferred work.
         checks = checks[:1]
     metrics = [{'name': 'requests', 'labels': {}, 'value': result.get('requests', 0), 'unit': 'count'}]
+    projection_checks, projection_metrics = notion.projection_telemetry(path)
+    checks.extend(projection_checks)
+    metrics.extend(projection_metrics)
     payload = {'schema': 'telemetry/1', 'system': 'gsd-inbox', 'at': now,
                'state': 'green' if all(c['ok'] for c in checks) else 'red', 'checks': checks, 'metrics': metrics}
     TELEMETRY.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -302,7 +305,7 @@ def pull(path, *, sweep=False, do_clear=False, client=None, now=None):
         except BlockingIOError:
             # Publish is running at the connection's limit: touch nothing this pass.
             result.update(status='busy', reason='busy: Notion publish lock held')
-            telemetry(result, started.timestamp())
+            telemetry(result, started.timestamp(), path)
             return result
         db = connect(path)
         backoff = float(get(db, 'backoff_until') or 0)
@@ -310,7 +313,7 @@ def pull(path, *, sweep=False, do_clear=False, client=None, now=None):
             until = datetime.fromtimestamp(backoff, UTC).isoformat()
             result.update(status='backoff', reason='Notion rate-limit backoff until ' + until)
             put(db, 'last_pass', json.dumps(result))
-            telemetry(result, started.timestamp())
+            telemetry(result, started.timestamp(), path)
             db.close()
             return result
         notion.gate()
@@ -340,7 +343,7 @@ def pull(path, *, sweep=False, do_clear=False, client=None, now=None):
                 put(db, 'backoff_until', str(time.time() + step))
             result['requests'] = client.requests()['total']
             put(db, 'last_pass', json.dumps(result))
-            telemetry(result, time.time())
+            telemetry(result, time.time(), path)
     return result
 
 

@@ -198,6 +198,7 @@ and risks, not churn. Finish open.md: plan, hard calls, deliberate
 omissions, weakest rows, and 'Open after this step' with each unresolved question and its
 record. Write it before ending.
 If compacted, re-read packet-a.md before acting. Report counts and three least certain calls.
+Before you finish, take a moment and reflect on what you saw. In a few words: what changed?
 """
 
 REVIEW_ROLE = """Goal: every change in your scope is true to its cited sources as of the cut;
@@ -210,6 +211,7 @@ omissions with grp={group} and accept them. Earlier decisions are context; chang
 only with a sourced correction.
 {invariants}
 Write notes-{group}.md: what you changed and why, what you added, what stays uncertain.
+Before you finish, take a moment and reflect on what you saw. In a few words: what needed you, and what kind of miss was it?
 """.replace('{invariants}', textwrap.fill(
     "Invariants: the contract's principles (" + ', '.join(p['name'] for p in PRINCIPLES)
     + ') and store write checks (atomic advertised verbs, valid fields/links/citations,'

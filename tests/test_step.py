@@ -559,7 +559,8 @@ if True:
         cli('decide',{'decisions':[{'id':'b-r1-1','decision':'accept','by':'r1'}]})
     if role!='a': (root/('notes-'+role+'.md')).write_text('No disagreements')
 print(json.dumps({'type':'assistant','message':{'id':'call','model':'synthetic','usage':{'input_tokens':7},'content':[]}}))
-print(json.dumps({'type':'result','subtype':'success','is_error':False}))
+print(json.dumps({'type':'result','subtype':'success','is_error':False,
+                  'structured_output': {'reflection': 'Changed work.' if role == 'a' else 'Missed a person.'}}))
 '''.replace('__GSD__', repr(str(ROOT / 'bin/gsd')))
         )
         ctl.chmod(0o700)
@@ -587,6 +588,18 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False}))
         self.assertIn('## prev-step.md', (self.root / 'next/packet-a.md').read_text())
         self.assertEqual(result['state'], 'committed')
         self.assertEqual(result['changes'], 2)
+        from gsd import steady
+        from gsd.contract_validate import problems
+        record = dict(links=[], steps=0, counts=dict.fromkeys(
+            ('proposed', 'accepted', 'amended', 'rejected', 'held', 'records_landed'), 0),
+            weighted_tokens=0, model_calls=0)
+        steady.tally(record, run)
+        self.assertEqual(record['reflections'], [
+            dict(agent='a', text='Changed work.', step=run.name),
+            dict(agent='r1', text='Missed a person.', step=run.name),
+        ])
+        contract = json.loads((ROOT / 'contracts/vendor/steward.record.v1.json').read_text())
+        self.assertEqual(problems(contract, record), [])
         self.assertEqual(result['groups']['groups'], {'r1': ['a1', 'b-r1-1']})
         self.assertFalse((run / 'packet-people.md').exists())
         self.assertFalse(result['commit']['refused'])
@@ -646,6 +659,29 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False}))
         self.assertEqual(calls[0]['usage']['input_tokens'], 2)
         self.assertEqual(json.loads((run / 'agent-a.json').read_text())['state'], 'read-only-proof')
         self.assertFalse((run / 'captures/a.check.json').exists())
+
+    def test_optional_reflection_is_bounded_in_existing_receipt(self):
+        from gsd import reflections
+        for name, value in [('a', 'Saw a change.'), ('r1', 'Missed a date.'),
+                            ('a-long', 'x' * (reflections.MAX_CHARS + 100)), ('r2', None)]:
+            run = self.root / name
+            run.mkdir()
+            (run / 'captures').mkdir()
+            result = dict(type='result', subtype='success', is_error=False)
+            if value is not None:
+                result['structured_output'] = {reflections.FIELD: value}
+
+            def headless(run, agent, args, *rest):
+                schema = json.loads(args[args.index('--json-schema') + 1])
+                self.assertEqual(schema, reflections.OUTPUT_SCHEMA)
+                (run / 'captures' / f'{agent}.stream.jsonl').write_text(json.dumps(result))
+                return 0
+
+            with patch.object(step, 'headless', side_effect=headless), patch.object(step, 'acceptance'):
+                step.launch(run, name, 'synthetic', '2026-01-02T00:00:00Z')
+            receipt = json.loads((run / f'agent-{name}.json').read_text())
+            self.assertEqual(receipt[reflections.FIELD], (value or '')[:reflections.MAX_CHARS])
+            self.assertEqual(receipt['state'], 'proven')
 
     def test_usage_one_row_per_call(self):
         stream = self.root / 'stream.jsonl'

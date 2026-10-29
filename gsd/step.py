@@ -12,6 +12,7 @@ import uuid
 
 from . import db as store, read, draft, export, packets, tags, feed
 from .capture import capture
+from . import reflections
 
 CLAUDE = 'claude'
 
@@ -86,6 +87,7 @@ def launch(
         'state': 'starting',
         'read_only': read_only,
         'effort': effort,
+        reflections.FIELD: '',
     }
     save(receipt_path, receipt)
     args = [CLAUDE, '-p', '--model', model, '--effort', effort]
@@ -93,6 +95,8 @@ def launch(
     args += ['--append-system-prompt-file', str(run / 'shared.md'), '--session-id', session]
     args += ['--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']
     args += ['--disable-slash-commands', '--tools', 'Bash,Read,Write,Edit']
+    if not read_only:
+        args += ['--json-schema', json.dumps(reflections.OUTPUT_SCHEMA)]
     env = dict(
         os.environ,
         QMD_UNTIL=until,
@@ -118,6 +122,7 @@ def launch(
         calls, result = usage(stream)
         save(run / 'captures' / f'{name}.usage.json', calls)
         save(run / 'captures' / f'{name}.result.json', result)
+        receipt[reflections.FIELD] = reflections.text(result or {})
         if code or not result or result.get('is_error') or result.get('subtype') != 'success':
             raise ValueError('session did not finish successfully')
         if read_only:

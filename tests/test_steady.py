@@ -725,12 +725,13 @@ step.run(SimpleNamespace(since='2026-01-01T00:00:00Z', until='2026-01-02T00:00:0
         self.assertEqual(problems(RECORD_CONTRACT, json.loads(lines[1])), [])
         self.assertEqual(json.loads(lines[0]), {'kind': 'unrelated'})
         self.assertEqual(len(lines), 2)
+        self.assertEqual(result['reflections'], [])
         self.assertEqual(result['published'], ['archive', 'publish qmd', 'backup', 'publish notion'])
         self.assertEqual(result['notion'], 'published')
         self.assertEqual(
             set(result),
             {
-                'schema', 'provider', 'model_calls', 'terminated', 'links', 'error',
+                'schema', 'provider', 'model_calls', 'terminated', 'links', 'reflections', 'error',
                 'bounded_by', 'fresh_through', 'steward_run_id',
                 'kind',
                 'since',
@@ -851,8 +852,8 @@ step.run(SimpleNamespace(since='2026-01-01T00:00:00Z', until='2026-01-02T00:00:0
         run = self.root / 'steady-synthetic'
         run.mkdir()
         for name, receipt in {
-            'a': {'session_id': 'started-session', 'pid': 123, 'state': 'failed'},
-            'r1': {'session_id': 'unstarted-session', 'state': 'failed'},
+            'a': {'session_id': 'started-session', 'pid': 123, 'state': 'failed', 'reflection': 'Dates changed.'},
+            'r1': {'session_id': 'unstarted-session', 'state': 'failed', 'reflection': ''},
             'r2': {'session_id': None, 'pid': 124},
         }.items():
             (run / f'agent-{name}.json').write_text(json.dumps(receipt))
@@ -864,6 +865,12 @@ step.run(SimpleNamespace(since='2026-01-01T00:00:00Z', until='2026-01-02T00:00:0
             ),
         }
         steady.tally(record, run)
+        self.assertEqual(record['reflections'], [dict(agent='a', text='Dates changed.', step=run.name)])
+        with patch.dict(os.environ, {'STEWARD_RUN_DIR': str(self.root / 'steward-run')}):
+            steady.emit(record, self.db)
+        emitted = json.loads((self.root / 'steward-run' / 'records.jsonl').read_text())
+        self.assertEqual(emitted['reflections'], record['reflections'])
+        self.assertEqual(problems(RECORD_CONTRACT, emitted), [])
         self.assertEqual(record['links'], [existing, {
             'session': 'started-session', 'agent': 'claude',
             'label': 'a', 'step': run.name,

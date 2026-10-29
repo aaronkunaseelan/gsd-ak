@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import db as store
-from . import draft
+from . import draft, reflections
 from .contract_validate import problems
 from .tokens import weighted_tokens
 
@@ -141,6 +141,9 @@ def usage(run):
 def tally(record, run, target=None):
     from .runs import measure
     measured = measure(run)
+    record.setdefault('reflections', []).extend(
+        dict(step=run.name, **row) for row in reflections.collect(run)
+    )
     for key, value in measured.items():
         if key == 'missing':
             continue
@@ -247,6 +250,7 @@ def run(path):
         'model_calls': 0,
         'terminated': False,
         'links': [],
+        'reflections': [],
         'error': None,
         'bounded_by': None,
         'fresh_through': {},

@@ -6,6 +6,17 @@ qualified where later decisions changed them; an experimental plan is not a
 promise of current behavior. The implementation and shipped contracts define
 the interface.
 
+## D35. Short model reflections reach Steward
+
+The proposer and each reviewer may leave a short free-form reflection in the same
+model call. These are words about the run, not a form or a second judgement pass.
+Keep them on the existing agent receipt, truncate rather than fail on length, and
+carry them as additive run facts in the Steward-owned record protocol. Steward
+chooses whether and how to explain them; no new message or wake rule is implied.
+Owner wording and provenance: control folder `docs/owner-decisions.md`, D35.
+Lives in: `packets.A_ROLE`, `packets.REVIEW_ROLE`, `reflections`, `step.launch`,
+`steady.tally`, and `contracts/vendor/steward.record.v1.json`.
+
 ## D1. A local SQLite store
 
 Keep the canonical graph in a private SQLite WAL store, outside code releases

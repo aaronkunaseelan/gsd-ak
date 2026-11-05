@@ -155,6 +155,29 @@ class Inbox(unittest.TestCase):
         self.assertEqual(inbox.read_events(self.client, conn, fetch), {'events': 0})
         self.assertEqual(asked, [0, 3])
 
+    def test_a_network_blip_is_retried_once_and_a_repeat_names_its_reason(self):
+        import socket
+        import urllib.error
+        conn = inbox.connect(self.path)
+        calls = []
+
+        def flaky(after):
+            calls.append(after)
+            if len(calls) == 1:
+                raise urllib.error.URLError(socket.timeout('timed out'))
+            return []
+        self.assertEqual(inbox.events_result(self.client, conn, flaky, pause=0), 0)
+        self.assertEqual(len(calls), 2)
+
+        def down(after):
+            raise urllib.error.URLError(socket.gaierror(-3, 'Temporary failure in name resolution'))
+        self.assertEqual(inbox.events_result(self.client, conn, down, pause=0),
+                         'error: URLError: [Errno -3] Temporary failure in name resolution')
+
+        def broken(after):
+            return [{'seq': 1}]   # no 'type': a contract break, not retried
+        self.assertEqual(inbox.events_result(self.client, conn, broken, pause=0), 'error: KeyError')
+
     def test_pull_skips_while_publish_holds_the_lock_and_reports_missing_capability(self):
         with open(str(self.path) + '.notion.lock', 'a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)

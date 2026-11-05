@@ -149,6 +149,26 @@ def read_events(client, db, fetch=None):
             return {'events': found}
 
 
+def events_result(client, db, fetch=None, pause=5):
+    """read_events' count, or 'error: <type>[: <reason>]' for the webhook_events check.
+
+    A network failure is tried once more after a pause: the cursor makes the retry safe, and a single
+    blip reaching the mech-d Worker (3 in 7 days, 29 Oct to 4 Nov) turned the pass red. The reason
+    (timed out, name resolution, reset) is kept so a repeat names its cause; it never holds the URL.
+    """
+    for attempt in (1, 2):
+        try:
+            return read_events(client, db, fetch)['events']
+        except OSError as exc:
+            if attempt == 1:
+                time.sleep(pause)
+                continue
+            reason = getattr(exc, 'reason', None) or exc.strerror
+            return 'error: ' + type(exc).__name__ + (': ' + str(reason)[:120] if reason else '')
+        except (ValueError, KeyError) as exc:
+            return 'error: ' + type(exc).__name__
+
+
 def mark(db, block, value, cut):
     with db:
         db.execute('UPDATE comments SET cleared=? WHERE block_id=? AND cleared IS NULL AND seen_at <= ?',
@@ -324,10 +344,7 @@ def pull(path, *, sweep=False, do_clear=False, client=None, now=None):
                     result['comments'] = read_comments(client, gdb, db, started, sweep)
                 except ValueError as exc:
                     result['comments'] = 'no_capability' if 'HTTP 403' in str(exc) else 'error'
-                try:
-                    result['events'] = read_events(client, db)['events']
-                except (OSError, ValueError, KeyError) as exc:
-                    result['events'] = 'error: ' + type(exc).__name__
+                result['events'] = events_result(client, db)
                 if do_clear and isinstance(result['comments'], dict):
                     result['cleared'] = clear(client, gdb, db, store.pipeline_cut(gdb)['until'] or '')
                 result['status_page'] = status_page.publish(path, client, root_page(client, gdb, db), db, started, result['comments'])

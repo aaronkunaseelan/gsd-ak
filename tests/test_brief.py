@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from gsd import db as store, brief, worklist, write
+from gsd import db as store, brief, owner, worklist, write
 from gsd.contract_validate import problems
 
 BRIEF = json.loads((ROOT / 'contracts/gsd.brief.v1.json').read_text())
@@ -87,6 +87,52 @@ class Views(unittest.TestCase):
             self.assertEqual(json.loads(result.stdout), contract)
         verbs = json.loads(self.cli('verbs').stdout)
         self.assertTrue({'brief', 'closures'} <= {v['name'] for v in verbs})
+
+    def athens(self):
+        """Owner days are the owner's zone; these tests fix it at Europe/Athens."""
+        path = Path(self.tmp.name) / 'owner.json'
+        path.write_text(json.dumps({'timezone': 'Europe/Athens'}))
+        env = patch.dict(os.environ, GSD_OWNER_CONFIG=str(path))
+        env.start()
+        self.addCleanup(env.stop)
+        self.addCleanup(owner._zone.cache_clear)
+        self.addCleanup(owner._read.cache_clear)
+        owner._read.cache_clear()
+        owner._zone.cache_clear()
+
+    def test_done_counts_distinct_ids_per_athens_day(self):
+        self.athens()
+        twice = self.upsert('item', title='Closed twice', state='done', when='2026-10-19T09:00Z')
+        self.upsert('item', twice, state='ready', when='2026-10-19T10:00Z')
+        self.upsert('item', twice, state='done', when='2026-10-19T11:00Z')
+        self.upsert('item', title='Closed late in UTC', state='done', when='2026-10-20T23:30Z')
+        self.upsert('item', title='Canceled', state='canceled', when='2026-10-21T08:00Z')
+        with patch.object(store, 'now', return_value=store.iso('2026-10-22T00:00Z')):
+            result = worklist.closures_command(SimpleNamespace(db=self.path, since='2026-10-18T00:00Z'))
+        self.assertEqual(len(result['closures']), 4)
+        self.assertEqual(result['done_counts'], {
+            '2026-10-19': {'done': 1, 'canceled': 0},
+            '2026-10-21': {'done': 1, 'canceled': 1},
+        })
+
+    def test_done_counts_in_contract(self):
+        self.athens()
+        self.upsert('item', title='Done', state='done', when='2026-10-19T09:00Z')
+        cli = self.cli('closures', '--since', '2026-10-18T00:00:00+00:00')
+        self.assertEqual(cli.returncode, 0, cli.stdout + cli.stderr)
+        payload = json.loads(cli.stdout)
+        self.assertEqual(problems(CLOSURES, payload), [])
+        self.assertEqual(payload['done_counts'], {'2026-10-19': {'done': 1, 'canceled': 0}})
+        negative = {**payload, 'done_counts': {'2026-10-19': {'done': -1, 'canceled': 0}}}
+        self.assertEqual(problems(CLOSURES, negative), ['$.done_counts.2026-10-19.done: below 0'])
+
+    def test_done_counts_empty_window(self):
+        self.athens()
+        self.upsert('item', title='Closed before the window', state='done', when='2026-10-10T09:00Z')
+        with patch.object(store, 'now', return_value=store.iso('2026-10-22T00:00Z')):
+            result = worklist.closures_command(SimpleNamespace(db=self.path, since='2026-10-18T00:00Z'))
+        self.assertEqual(result['closures'], [])
+        self.assertEqual(result['done_counts'], {})
 
     def test_closures_use_the_closure_time_since_a_boundary(self):
         project = self.upsert('project', name='Work', status='active')

@@ -430,6 +430,40 @@ print(json.dumps({'schema':'qmd.feed.v1','source':source,'items':[], 'next':None
             )
             self.assertTrue(allowed[0]['ok'])
 
+    def test_capture_spends_only_azure_pages(self):
+        for pages, spent, charged in [
+            ({'azure': 0, 'covered': 4, 'requested': 4, 'total': 1}, 0, 0),
+            ({'azure': 3, 'covered': 4, 'requested': 4, 'total': 1}, 3, 3),
+        ]:
+            with self.subTest(pages=pages):
+                def qmd(*args, **kw):
+                    if '--materialise' in args:
+                        return {'docs': [{'id': args[1], 'parts': [], 'pages': pages}]}
+                    return None
+
+                selected = {
+                    'kept_mail': [
+                        {
+                            'id': 'gmail:test',
+                            'attachments': [{'id': 'gmail:test/att/1', 'name': 'one.pdf'}],
+                            'parts': [],
+                        }
+                    ],
+                    'docs': {},
+                    'refs': {},
+                    'meetings': [],
+                    'views': {'mail.md': '', 'meetings.md': ''},
+                    'manifest': {'meetings': {'kept': 0}},
+                }
+                ledger = capture(qmd, selected)
+                self.assertEqual(ledger['pages_spent'], spent)
+                self.assertEqual(ledger['pages_covered'], 4)
+                self.assertEqual(ledger['budget_charged'], charged)
+                row = ledger['results'][0]
+                self.assertEqual(row['spent'], spent)
+                self.assertEqual(row['pages'], 4)
+                self.assertEqual(row['azure'], pages['azure'])
+
     def test_capture_routes_pdf_docx_image_and_shared_summary(self):
         for name, expected_pages, count in [
             ('one.pdf', ['--pages', '4'], 4),
@@ -718,6 +752,97 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False}))
         self.assertFalse(calls[1]['tool_use'])
         self.assertEqual(result['subtype'], 'success')
 
+    def test_claude_a_argv_unchanged(self):
+        from gsd import reflections
+
+        run = self.root / 'argv'
+        run.mkdir()
+        (run / 'captures').mkdir()
+        (run / 'shared.md').write_text('shared')
+        (run / 'prompt-a.md').write_text('first message')
+        ctl = self.root / 'claude'
+        ctl.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, sys
+pathlib.Path(os.environ['ARGV']).write_text(json.dumps(sys.argv[1:]))
+assert sys.stdin.read() == 'first message'
+print(json.dumps({'type':'assistant','message':{'id':'call','usage':{'input_tokens':3},'content':[]}}))
+print(json.dumps({'type':'result','subtype':'success','is_error':False}))
+''')
+        ctl.chmod(0o700)
+        with (
+            patch.object(step, 'CLAUDE', str(ctl)),
+            patch.object(step, 'acceptance'),
+            patch.dict(os.environ, {'ARGV': str(self.root / 'argv.json')}),
+        ):
+            step.launch(run, 'a', 'claude-opus-5-5', '2026-01-02T00:00:00Z', effort_a='high')
+        receipt = json.loads((run / 'agent-a.json').read_text())
+        self.assertEqual(
+            json.loads((self.root / 'argv.json').read_text()),
+            [
+                '-p', '--model', 'claude-opus-5-5', '--effort', 'high',
+                '--permission-mode', 'bypassPermissions',
+                '--output-format', 'stream-json', '--verbose',
+                '--append-system-prompt-file', str(run / 'shared.md'),
+                '--session-id', receipt['session_id'],
+                '--setting-sources', '', '--strict-mcp-config',
+                '--mcp-config', '{"mcpServers":{}}',
+                '--disable-slash-commands', '--tools', 'Bash,Read,Write,Edit',
+                '--json-schema', json.dumps(reflections.OUTPUT_SCHEMA),
+            ],
+        )
+        self.assertEqual((receipt['vendor'], receipt['model']), ('claude', 'claude-opus-5-5'))
+        self.assertEqual(receipt['state'], 'proven')
+
+    def test_failure_cause_usage_limit(self):
+        stream = self.root / 'usage.jsonl'
+        stream.write_text(json.dumps({
+            'type': 'result', 'subtype': 'error_during_execution', 'is_error': True,
+            'result': 'Claude AI usage limit reached. Please try again later.',
+        }) + '\n')
+        _, result = step.usage(stream)
+        self.assertEqual(step.failure_cause(1, result, stream.read_text()), 'usage limit')
+        # claude's status field names the same class without any text at all.
+        limited = {'type': 'result', 'subtype': 'error_during_execution', 'is_error': True,
+                   'api_error_status': 429}
+        self.assertEqual(step.failure_cause(1, limited, ''), 'rate limit')
+        self.assertEqual(step.failure_cause(1, {**limited, 'api_error_status': 401}, ''), 'auth')
+
+    def test_failure_cause_no_envelope(self):
+        stream = self.root / 'empty.jsonl'
+        stream.write_text('')
+        self.assertIsNone(step.usage(stream)[1])
+        self.assertEqual(step.failure_cause(1, None, ''), 'no result')
+        # An envelope with nothing to name falls back to the exit number, or `error`.
+        self.assertEqual(step.failure_cause(3, {'subtype': 'error_during_execution'}, ''), 'exit 3')
+        self.assertEqual(step.failure_cause(0, {'subtype': 'error_during_execution'}, ''), 'error')
+
+    def test_failure_cause_never_leaks_text(self):
+        run = self.root / 'leak'
+        run.mkdir()
+        (run / 'captures').mkdir()
+        (run / 'shared.md').write_text('shared')
+        (run / 'prompt-a.md').write_text('first message')
+        secret = 'sk-ant-api03-PRIVATEVALUE0123456789'
+        ctl = run / 'claude'
+        ctl.write_text('''#!/usr/bin/env python3
+import json
+print(json.dumps({'type':'result','subtype':'error_during_execution','is_error':True,
+                  'result':'TEXT','api_error_status':400}))
+'''.replace('TEXT', 'usage limit reached for SYNTHETIC-MODEL: ' + secret))
+        ctl.chmod(0o700)
+        with patch.object(step, 'CLAUDE', str(ctl)):
+            with self.assertRaises(ValueError) as caught:
+                step.launch(run, 'a', 'SYNTHETIC-MODEL', '2026-01-02T00:00:00Z')
+        message = str(caught.exception)
+        self.assertEqual(
+            message,
+            'session a did not finish successfully: usage limit; '
+            'inspect private captures, do not retry blindly',
+        )
+        self.assertNotIn(secret, message)
+        self.assertNotIn('SYNTHETIC-MODEL', message)
+        self.assertEqual(json.loads((run / 'agent-a.json').read_text())['state'], 'failed')
+
     def test_failed_launch_captured_and_never_retried(self):
         run = self.root / 'run'
         run.mkdir()
@@ -729,6 +854,8 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False}))
 import json, os, sys
 assert len(sys.stdin.read()) > 131072
 assert os.environ['QMD_UNTIL']=='2026-01-02T00:00:00Z'
+assert os.environ['QMD_NOT_ORIGIN']=='steward,gsd'
+assert os.environ['CLAUDE_CODE_PROMPT_CACHE_TTL']=='5m'
 assert os.environ['GSD_ACTOR']=='a'
 assert os.environ['CLAUDE_CODE_DISABLE_AUTO_MEMORY']=='1'
 assert os.environ['GSD_DB'].endswith('/step.sqlite')

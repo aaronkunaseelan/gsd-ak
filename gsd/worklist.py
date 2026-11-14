@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 
-from . import db as store
+from . import db as store, owner
 from .items import history, is_open
 
 
@@ -120,16 +120,35 @@ def closures(db, since, at):
     ]
 
 
+def done_counts(events):
+    """Distinct items closed per owner day: {day: {done, canceled}}.
+
+    A day is the owner's day (`owner.zone`, the same definition every owner-facing
+    day uses). An item closed twice returns once, under the state it ended the day in.
+    """
+    states = {}
+    for row in events:
+        day = datetime.fromisoformat(row['at'].replace('Z', '+00:00')).astimezone(owner.zone()).date()
+        states.setdefault(day.isoformat(), {})[row['id']] = row['state']
+    return {
+        day: {'done': sum(s == 'done' for s in closed.values()),
+              'canceled': sum(s == 'canceled' for s in closed.values())}
+        for day, closed in sorted(states.items())
+    }
+
+
 def closures_command(a):
     """gsd.closures.v1: the same rows as done, over the caller's window (Steward's 'used' reads this)."""
     since = store.iso(a.since)
     with store.connect(a.db) as db:
         db.execute('BEGIN')
         at = store.now()
+        events = closures(db, since, at)
         return {
             'schema': 'gsd.closures.v1',
             'at': at,
             'since': since,
             'cut': store.pipeline_cut(db),
-            'closures': closures(db, since, at),
+            'closures': events,
+            'done_counts': done_counts(events),
         }

@@ -105,6 +105,68 @@ def view(db, sparse=False, ids=None):
     return '\n'.join(out).rstrip() + '\n'
 
 
+INDEX_TITLE = 95
+
+
+def index(db, ids=None):
+    """The same graph as one line per record: an index A opens with `gsd show`.
+
+    Project-grouped, each project's own line as the group header, then people,
+    meetings and items with no project. Narrative fields are dropped and a title
+    past INDEX_TITLE is cut; ids are the short ids view() and `gsd show` use.
+    """
+    state = graph(db)
+    shorts = short_ids(state)
+    names = {r['id']: ' '.join(str(store.name(r)).split()) for r in state['records']}
+    project_for = item_projects(state)
+    projects = {p['id'] for p in state['projects']}
+
+    def keep(r):
+        return ids is None or r['id'] in ids
+
+    def line(table, r, indent=''):
+        bits = [shorts.get(r['id'], r['id'][:8]), 'person' if table == 'people' else table[:-1]]
+        progress = r.get('status') or r.get('state')
+        if progress:
+            bits.append(str(progress))
+        if r.get('next_actor'):
+            bits.append('next=' + str(r['next_actor']))
+        for field, label in (('assigned_to', 'assigned'), ('owner_person_id', 'owner')):
+            if r.get(field):
+                bits.append(label + '=' + shorts.get(r[field], str(r[field])[:28]))
+        bits.append((r.get('updated_at') or r.get('created_at') or '')[:10])
+        title = names.get(r['id'], r['id'])
+        return (
+            f'{indent}- ' + ' · '.join(b for b in bits if b) + '  '
+            + (title[:INDEX_TITLE] + '…' if len(title) > INDEX_TITLE else title)
+        )
+
+    out = []
+    for p in state['projects']:
+        items = [i for i in state['items'] if project_for.get(i['id']) == p['id']]
+        if not (keep(p) or any(keep(i) for i in items)):
+            continue
+        header = f'## {names.get(p["id"], p["id"])} [{shorts.get(p["id"], p["id"][:8])}]'
+        header += ''.join(
+            f' {b}' for b in (p.get('status'), (p.get('updated_at') or '')[:10]) if b
+        )
+        out.append(header)
+        out.extend(line('items', i, '  ') for i in items if keep(i))
+        out.append('')
+    for table, heading in (('people', 'People'), ('meetings', 'Meetings')):
+        kept = [r for r in state[table] if keep(r)]
+        if kept:
+            out.append('## ' + heading)
+            out.extend(line(table, r) for r in kept)
+            out.append('')
+    loose = [i for i in state['items'] if project_for.get(i['id']) not in projects and keep(i)]
+    if loose:
+        out.append('## Items with no project')
+        out.extend(line('items', i) for i in loose)
+        out.append('')
+    return '\n'.join(out).rstrip() + '\n'
+
+
 def show(db, queries):
     state = graph(db)
     names = {r['id']: store.name(r) for r in state['records']}

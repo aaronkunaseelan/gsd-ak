@@ -16,6 +16,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from gsd import db as store, packets, step, tags, write
 
+# The rollback selector: the claude branch keeps the pre-selector argv byte for byte.
+CLAUDE = 'claude:claude-haiku-5-5'
+
 
 def state(n=4):
     graph = {t: [] for t in store.TABLES}
@@ -190,6 +193,24 @@ class Tags(unittest.TestCase):
         self.assertEqual(cards[0]['cited_chats_and_subjects'], ['Synthetic subject'])
         graph['source_refs'].append({'record_id': 'p1', 'source_key': a['id']})
         self.assertEqual(tags.cards_and_routes(graph, qmd, '2026-01-02T00:00:00Z')[1], {})
+
+    def test_unresolved_refs_are_counted_by_kind(self):
+        graph = state(2)
+        graph['source_refs'] = [
+            {'record_id': 'p1', 'evidence_qmd_event_id': 'gmail:a:held'},
+            {'record_id': 'p1', 'evidence_qmd_event_id': 'gmail:a:gone'},
+            {'record_id': 'p1', 'evidence_qmd_event_id': 'gmail:a:m/att/2'},
+            {'record_id': 'p1', 'evidence_qmd_event_id': 'fathom:a:9'},
+        ]
+        held = doc('gmail:a:held', at='2026-01-01T00:00:00Z')
+
+        def qmd(*args, **kw):
+            return {'docs': [held]}
+
+        report = {}
+        tags.cards_and_routes(graph, qmd, '2026-01-02T00:00:00Z', report)
+        self.assertEqual(report, {'asked': 4, 'unresolved': 3,
+                                  'unresolved_by_kind': {'gmail': 1, 'gmail-attachment': 1, 'fathom': 1}})
 
     def test_group_chats_are_never_sticky(self):
         graph = state(2)
@@ -378,7 +399,9 @@ class Tags(unittest.TestCase):
                 response = SimpleNamespace(returncode=0, stderr='', stdout=json.dumps(
                     {'result': json.dumps(reply), 'usage': {}}))
                 with patch.object(tags.subprocess, 'run', return_value=response):
-                    rows, calls = tags.haiku(self.root, [unit('a')], supplied)
+                    rows, calls = tags.haiku(
+                        self.root, [unit('a')], supplied, CLAUDE
+                    )
                 self.assertEqual(rows[0]['projects'], expected)
                 self.assertEqual(rows[0]['name_keys_mapped'], mapped)
                 self.assertEqual(rows[0]['unknown_project_ids'], unknown)
@@ -415,7 +438,7 @@ class Tags(unittest.TestCase):
             )
 
         with patch.object(tags.subprocess, 'run', side_effect=provider):
-            rows, calls = tags.haiku(self.root, [unit('a')], state(1)['projects'])
+            rows, calls = tags.haiku(self.root, [unit('a')], state(1)['projects'], CLAUDE)
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1]['usage']['cache_read_input_tokens'], 20)
         self.assertEqual(rows[0]['id'], 'a')
@@ -428,7 +451,7 @@ class Tags(unittest.TestCase):
             return_value=SimpleNamespace(returncode=0, stderr='', stdout='{}'),
         ) as provider:
             with self.assertRaisesRegex(ValueError, 'twice'):
-                tags.haiku(self.root, [unit('a')], state(1)['projects'])
+                tags.haiku(self.root, [unit('a')], state(1)['projects'], CLAUDE)
             self.assertEqual(provider.call_count, 2)
 
     def test_tagged_packet_prefix_is_identical_and_no_tags_unchanged(self):
@@ -581,6 +604,8 @@ print(json.dumps({'type':'result','subtype':'success'}))
                 'synthetic',
                 '--review',
                 'synthetic',
+                '--tags-model',
+                CLAUDE,
                 '--effort-a',
                 'high',
                 '--json',

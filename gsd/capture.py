@@ -45,14 +45,26 @@ def capture(qmd, selected, cap=300):
                 cached = not result['_extracted']
             docs = result.get('docs') or []
             covered = sum(d.get('pages', {}).get('covered', 0) for d in docs)
+            # Spend is the pages qmd sent to Azure, which a local text layer avoids.
+            # A qmd answer without pages.azure on every doc leaves it unknown.
+            azure = (
+                sum(d['pages']['azure'] for d in docs)
+                if docs and all('azure' in (d.get('pages') or {}) for d in docs)
+                else None
+            )
             ledger['pages_covered'] += covered
-            spent = 0 if cached else covered
+            spent = 0 if cached else (azure if azure is not None else covered)
             ledger['pages_spent'] += spent
             # Unknown failed PDF calls reserve four pages conservatively. DOCX can
             # exceed the soft cap by its final document; do not start another.
-            ledger['budget_charged'] += (
-                0 if cached else max(spent, 4 if kind == 'pdf' else 1 if kind == 'docx' else 0)
-            )
+            if cached:
+                ledger['budget_charged'] += 0
+            elif azure is not None and docs:
+                ledger['budget_charged'] += spent
+            else:
+                ledger['budget_charged'] += max(
+                    spent, 4 if kind == 'pdf' else 1 if kind == 'docx' else 0
+                )
             ledger['results'].append(
                 {
                     'id': ref,
@@ -61,6 +73,7 @@ def capture(qmd, selected, cap=300):
                     'reason': result.get('reason'),
                     'pages': covered,
                     'spent': spent,
+                    'azure': azure,
                     'cached': cached,
                 }
             )

@@ -21,8 +21,8 @@ one-shot command for compatibility, not a scheduler.
   earlier-dated evidence is selected by the first cut after it arrives.
 - Windows up to and including three days use one step. Longer outage windows
   use consecutive two-day pieces (including a shorter final piece).
-- Defaults are `--effort-a high --effort-review high --tags`, with the step's
-  existing model defaults. `GSD_STEP_ARGV`, if set, is a JSON string-array override.
+- Defaults are `steady.DEFAULT_ARGS`, which owns the default models and flags.
+  `GSD_STEP_ARGV`, if set, is a JSON string-array override.
   `{since}` and `{until}` expand per piece. Managed `--db`, `--since`, `--until`
   and `--run` are appended last; configured bounds cannot override the committed
   cursor. `--dry` and `--restate` do not belong to this runner and are refused.
@@ -160,7 +160,10 @@ The enum trigger is replaced from schema.sql; the migration is idempotent.
 `gsd contract gsd.worklist.v1` prints the shipped schema without opening a DB.
 `gsd closures --since ISO --json` (`gsd.closures.v1`) returns the same closure rows
 as `done` over a caller-chosen window, so a consumer can judge a past day after the
-steady run that learned it. `gsd brief ID… --json` (`gsd.brief.v1`) is the per-item
+steady run that learned it. Its `done_counts` adds those closures counted per owner
+day (`owner.zone`, the day every owner-facing view uses) as distinct items, so a
+consumer copies the count instead of recounting events.
+`gsd brief ID… --json` (`gsd.brief.v1`) is the per-item
 view for preparing the owner's work: summary, next_actions, waiting_on, people,
 Notion URL and qmd citations (`tests/test_brief.py`).
 `gsd export --json` is unchanged for experiments and is **not a contract**.

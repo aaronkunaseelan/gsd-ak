@@ -28,17 +28,22 @@ requires `commits` or `decides`; reviewer amendments use their source quote too.
 
 ### Tagged experiment (default)
 
-`--tags` (the default) uses tool-free Haiku 5.5 batches of about 25 units and a
+`--tags` (the default) uses tool-free batches of about 25 units on the model
+`--tags-model` names: `pi:<provider/model>` (default `pi:opencode-go-min/deepseek-v4.1-flash`,
+thinking high because this model maps no `medium`) or `claude:<model>` (the earlier argv,
+byte for byte), so rollback is a job-argv edit. `gsd verbs --json` prints the default.
+The call uses a
 fixed cached system prefix of short start-graph cards. Cards include project state,
 open titles, aliases of project people and recently cited chat/thread subjects.
-Haiku returns only likely project ids with p ≥ 0.05; omitted ids need no score.
+The model returns only likely project ids with p ≥ 0.05; omitted ids need no score.
 Unknown ids are dropped and counted without a retry. Retained display tags remain
 the top two at p ≥ 0.06. Retry/malformed/unknown-id counts are visible in step
 results and steady counts, including failed preparations.
 Only primary sources dated before the window start supply sticky routes: a chat
 or account-local mail thread cited for exactly one project gets p=1 without a call.
 Migration timestamps are not source dates. One malformed JSON batch is retried once;
-a provider failure or a second malformed batch stops the step.
+a provider failure or a second malformed batch stops the step, and the failure names
+the model it called.
 
 Units are mail threads, WhatsApp bursts (gap >3h splits, last three previous lines
 are context only), and meeting sections/checkbox actions. Attachments belong to
@@ -46,7 +51,7 @@ their message. Meeting parents are owned once and citation aliases expand to all
 sections. Each section retains its original parent ref/title, so regrouping cannot
 leave an action without a usable citation; only that metadata repeats, not content.
 `tags.json` records source ownership, refs, top two tags at p≥0.06,
-none/people probabilities, cards, model, actual cost and every call's usage/time.
+none/people probabilities, cards, the model selector, actual cost and every call's usage/time.
 Weighted tokens are `tokens.weighted_tokens`, the unit run records use.
 
 The frozen sparse window groups by top tag in graph order, chronological within
@@ -116,9 +121,14 @@ DOCX can overrun this soft cap by its final document. Fathom share links join th
 meeting summaries; account-only links remain links. Six attachment-head lines
 are included, and quoted mail is omitted rather than retained as old evidence.
 
-Packets contain the sparse graph, sparse window, people directory, field formats
+Packets contain the graph view, sparse window, people directory, field formats
 and previous-step digest. Block order is contract, graph view, sparse window,
-role, slice, task. `shared.md` holds the first three blocks, identical throughout
+role, slice, task. `--a-graph full` (the default) puts the sparse graph there;
+`--a-graph index` puts `read.index` instead: one line per record, project-grouped,
+with the hint that opens records through `gsd show` (batch ids) and `gsd fields`.
+Reviewer packets are always full, because a reviewer audits the records A touched.
+`views/graph.md` keeps the full render so the run folder carries the whole graph.
+`shared.md` holds the first three blocks, identical throughout
 one step; `prompt-NAME.md` holds role/slice/task and acceptance. Headless Claude
 Code appends `shared.md` to its system prompt (a cache breakpoint), then receives
 `prompt-NAME.md` as its FIRST user message on stdin. Shared text at the start of
@@ -126,14 +136,15 @@ one long user message is not enough: a cache hit needs a written breakpoint.
 `packet-NAME.md` preserves both parts together for inspection and compaction.
 Graph bodies, notes and descriptions are available through `gsd show`, not
 duplicated in the sparse index. `--dry` writes `packet-a.md` and `packet-review.md`,
-launching no proposer or reviewer. With default `--tags`, Haiku tagging still runs for real. The latter has the final reviewer rules and block structure; its slice
+launching no proposer or reviewer. With default `--tags`, the tagging model still
+runs for real. The latter has the final reviewer rules and block structure; its slice
 is necessarily a preview until A has proposed changes. Real relay packets are
 `packet-r1.md`, `packet-r2.md`, …, with current status, deltas, citations and
 touched records inserted in the slice only. `manifest.json` records chars/4
 estimates for each view, packet block, shared prefix and per-agent part. These
 are estimates, not API token counts: the 13→17 Aug proof estimated ~65k shared
-but Haiku's first-call shared cache read was ~124k. Budget an Opus run from its
-actual usage too; the ~90k packet target is a chars/4 planning estimate.
+but the tagging call's first-call shared cache read was ~124k. Budget an Opus run
+from its actual usage too; the ~90k packet target is a chars/4 planning estimate.
 
 Queued, unknown and page-cap attachment outcomes are recorded without blocking
 preparation or the parent's commit. Materialised child arrivals are counted
@@ -145,25 +156,50 @@ manifest and selected documents supply this evidence; an uncommitted draft is
 never proof of inclusion. Without prior selection evidence, the parent must
 satisfy the normal source policy. Missing acquisition responses remain unknown.
 
-A and each fresh sequential reviewer use `claude -p`; `--effort-a low|medium|high`
-(default medium) affects proposers only; `--effort-review` (default medium) sets
-reviewers. Both run with
-`--permission-mode bypassPermissions`, `--output-format stream-json --verbose`.
-`--a`/`--review` default to `claude-opus-5-5` and must match. Use
-`claude-haiku-5-5` for cheap plumbing proofs. User/project/local settings, skills
-and MCP configurations are disabled; every launch has the same four built-in
-tools (Bash, Read, Write, Edit). Normal CLI authentication/environment still
+A and each fresh sequential reviewer run through one launch function and either
+vendor, chosen per role by the selector on `--a`/`--review`: `claude:<model>` or
+`pi:<provider/model>`, where a bare name is a claude model (`pi_launch.split`).
+The two may differ: the boundary is one shared block, so there is no shared
+session prefix to lose.
+
+`--effort-a low|medium|high` (default medium) affects proposers only;
+`--effort-review` (default medium) sets reviewers. The claude argv is
+`claude -p --model MODEL --effort EFFORT` with
+`--permission-mode bypassPermissions`, `--output-format stream-json --verbose`,
+`--append-system-prompt-file RUN/shared.md`, `--session-id UUID`,
+`--setting-sources ''`, an empty `--mcp-config`, `--disable-slash-commands`,
+`--tools Bash,Read,Write,Edit`, and `--json-schema` for the reflection. Use
+`claude-haiku-5-5` for cheap plumbing proofs. The pi argv is
+`pi -p --mode json --session-id UUID --model MODEL --thinking LEVEL`
+(`pi_launch.THINKING`: this model maps no `medium`, so medium and high are both
+`high`) with `--append-system-prompt RUN/shared.md`, `--tools read,bash,write,edit`,
+`--no-extensions --no-skills --no-context-files --no-prompt-templates --no-mcp`,
+and `--session-dir RUN/sessions`. Both vendors get the same stdin prompt file,
+cwd, environment, one-hour wait and owned process-group kill.
+
+User/project/local settings, skills and MCP configurations are disabled; every
+launch has the same four tools. Normal CLI authentication/environment still
 apply. QMD_UNTIL, GSD_DB and GSD_ACTOR are passed explicitly; cwd is always the
 run folder. Neither the source text nor the large prompt travels in argv.
 Physical attachments have short `att#…` refs and six head lines, once only;
 derived generic URL metadata is omitted because the body carries its link.
 
+`gsd steady` builds its step from `steady.DEFAULT_ARGS`, which names the vendor
+and model per role. Rollback is that job's own argv (`GSD_STEP_ARGV`, a JSON
+array; docs/config.md) naming the flags it wants, not an edit to the constant.
+
 There is no HOLD, dispatch, resume or automatic relaunch, and these sessions
 are NOT visible in the agent interface. Inspect `agent-NAME.json` (session id, pid,
-state) and `captures/NAME.{stream.jsonl,stderr.txt,usage.json,result.json,check.json}`
-in the private run folder. Usage is deduplicated by API message id, not one row
-per streamed content block; result iterations include thinking tokens when
-available. Claude Code also keeps its normal local session transcript. The
+vendor, state) and `captures/NAME.{stream.jsonl,stderr.txt,usage.json,result.json,check.json}`
+in the private run folder. Usage is deduplicated by API message id (pi: by
+`responseId`), not one row per streamed content block; result iterations include
+thinking tokens when available. `step.usage` reads either stream: pi has no
+aggregate envelope, so `pi_launch.parse` sums its `turn_end` usage and cost,
+counts turns, and synthesises the `result` gsd's runner and measurements read,
+with `agent_settled.aborted` and the exit code as the success signal. The pi
+reflection has no schema: A or a reviewer writes `reflection.json` in the run
+folder and it is read on success; absent means none. Claude Code also keeps its
+normal local session transcript, pi its own under `RUN/sessions`. The
 runner waits up to one hour and kills its owned process group on return, timeout
 or exception, including tool children. A non-success result or the independent
 `check.py` failing stops the step; captures and the failed receipt remain. An

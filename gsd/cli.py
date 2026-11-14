@@ -7,7 +7,7 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
-from . import db as store, read, write, draft, owner
+from . import db as store, read, write, draft, owner, tags
 
 
 def stdin_json(required=True):
@@ -211,10 +211,15 @@ VERBS = [
             (['--restate'], {'action': 'store_true'}),
             (['--tags'], {'dest': 'tags', 'action': 'store_true', 'default': True}),
             (['--no-tags'], {'dest': 'tags', 'action': 'store_false'}),
+            (['--tags-model'], {'default': tags.DEFAULT_MODEL}),
+            (
+                ['--a-graph'],
+                {'dest': 'graph_mode', 'choices': ['full', 'index'], 'default': 'full'},
+            ),
             (['--effort-a'], {'choices': ['low', 'medium', 'high'], 'default': 'medium'}),
             (['--effort-review'], {'choices': ['low', 'medium', 'high'], 'default': 'medium'}),
         ],
-        'effect': 'Select/capture a private QMD window, snapshot, propose, review sequentially, commit and export. --restate skips selection and re-states each active project from its own sources, then runs the same review relay. --tags (default) calls Haiku even with --dry and groups the window by project; --no-tags keeps the ungrouped window. Every mode shares one review plan. --effort-a sets the proposer effort; --effort-review sets the effort of every reviewer. --dry launches no proposer or reviewer.',
+        'effect': 'Select/capture a private QMD window, snapshot, propose, review sequentially, commit and export. --restate skips selection and re-states each active project from its own sources, then runs the same review relay. --tags (default) calls the tagging model even with --dry and groups the window by project; --no-tags keeps the ungrouped window. --tags-model takes pi:<provider/model> or claude:<model>; the claude: branch keeps the earlier argv. --a and --review take the same selectors (a bare name is claude) and may name different vendors or models. Every mode shares one review plan. --effort-a sets the proposer effort; --effort-review sets the effort of every reviewer. --a-graph index gives A a one-line-per-record index opened with gsd show; full (default) gives the sparse graph. Reviewer packets stay full. --dry launches no proposer or reviewer.',
         'example': 'gsd step --since 2026-08-13 --until 2026-08-17 --db scratch.sqlite --dry',
         'handler': lambda a: __import__('gsd.step', fromlist=['run']).run(a),
     },

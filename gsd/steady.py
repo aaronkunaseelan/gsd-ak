@@ -22,7 +22,23 @@ from .tokens import weighted_tokens
 LAUNCHER = store.ROOT / 'bin/gsd'
 STATUS_CONTRACT = json.loads((store.ROOT / 'contracts/vendor/qmd.status.v1.json').read_text())
 SOURCES = ('gmail', 'whatsapp', 'fathom')
-DEFAULT_ARGS = ['--effort-a', 'high', '--effort-review', 'high', '--tags']
+# X-108: A and tagging on pi, the reviewer on claude, A on the record index. Rollback
+# is a job argv (GSD_STEP_ARGV) naming the flags it wants, not an edit here.
+DEFAULT_ARGS = [
+    '--a',
+    'pi:opencode-go-min/deepseek-v4.1-flash',
+    '--a-graph',
+    'index',
+    '--review',
+    'claude-opus-5-5',
+    '--effort-a',
+    'high',
+    '--effort-review',
+    'high',
+    '--tags',
+    '--tags-model',
+    'pi:opencode-go-min/deepseek-v4.1-flash',
+]
 
 
 def cursor(path):
@@ -160,12 +176,21 @@ def tally(record, run, target=None):
         agent = json.loads(path.read_text())
         # A receipt is written before launch; only a PID proves it started.
         if agent.get('session_id') and agent.get('pid'):
-            record['links'].append({
+            # The receipt names the vendor that wrote the transcript; older receipts
+            # are claude's, which kept it in the reader's own store.
+            link = {
                 'session': agent['session_id'],
-                'agent': 'claude',
+                'agent': agent.get('vendor') or 'claude',
                 'label': path.stem.removeprefix('agent-'),
                 'step': run.name,
-            })
+            }
+            if link['agent'] == 'pi':
+                # pi writes its transcript inside the run; only one file names this
+                # session, and an ambiguous run is left for the reader to report.
+                found = list((run / 'sessions').glob(f'*_{agent["session_id"]}.jsonl'))
+                if len(found) == 1:
+                    link['path'] = str(found[0].resolve())
+            record['links'].append(link)
     tokens, calls = usage(run)
     record['weighted_tokens'] += tokens
     record['model_calls'] += calls

@@ -14,9 +14,11 @@ import re
 import subprocess
 import time
 
-from . import selection as sel
+from . import pi_launch, selection as sel
 
-MODEL = 'claude-haiku-5-5'
+# The tagging model is a selector, so rollback is a job-argv edit: pi:<provider/model>
+# or claude:<model>. cli.VERBS owns the flag and its default.
+DEFAULT_MODEL = 'pi:opencode-go-min/deepseek-v4.1-flash'
 CONTRACT = '''Tag source units for the owner's work and life graph. Cards are the graph at
 window START. Return only likely projects with independent relevance probability p >= 0.05,
 not a softmax: several can be relevant. Prefer recall; these are hints, not filters.
@@ -72,6 +74,12 @@ def memberships(state):
     return result
 
 
+def ref_kind(ref):
+    """gmail, gmail attachment, wa or fathom: the kind of a cited ref, never its id."""
+    source = ref.split(':', 1)[0]
+    return source + ('-attachment' if '/att/' in ref else '')
+
+
 def route_key(doc):
     source = doc.get('source')
     thread = sel.field(doc, 'thread')
@@ -82,9 +90,11 @@ def route_key(doc):
     return None
 
 
-def cards_and_routes(state, qmd, start):
+def cards_and_routes(state, qmd, start, report=None):
     """Only primary refs whose source date precedes the window can support routes.
     Migration/version timestamps are not source dates and must not fence old refs.
+    `report`, when given, receives the refs asked and those qmd no longer holds, by kind (F-10):
+    a citation qmd answers 'not found' drops out of route support, and that drop is now counted.
     """
     membership = memberships(state)
     refs = defaultdict(set)
@@ -92,14 +102,22 @@ def cards_and_routes(state, qmd, start):
         ref = row.get('evidence_qmd_event_id') or row.get('source_key') or ''
         if ref.startswith(('gmail:', 'wa:', 'fathom:')):
             refs[ref].update(membership.get(row['record_id'], ()))
-    historical = {}
+    historical, returned = {}, set()
     ids = sorted(refs)
     for n in range(0, len(ids), 40):
         result = qmd('get', *ids[n : n + 40], '--no-quoted', '--json', missing_ok=True)
         for entry in result if isinstance(result, list) else [result]:
             for doc in (entry or {}).get('docs', []):
+                returned.add(doc.get('id'))
                 if doc.get('time') and sel.when(doc['time']) < sel.when(start):
                     historical[doc['id']] = doc
+    if report is not None:
+        missing = [ref for ref in ids if ref not in returned]
+        report.update(
+            asked=len(ids),
+            unresolved=len(missing),
+            unresolved_by_kind=dict(Counter(ref_kind(ref) for ref in missing)),
+        )
     support, contexts = defaultdict(set), defaultdict(list)
     for ref, doc in historical.items():
         key = route_key(doc)
@@ -440,9 +458,131 @@ def save_call_counts(run, calls):
     save(path, result)
 
 
-def haiku(run, units, cards):
+def call_argv(model, prefix):
+    """The tool-free batch call for a `pi:` or `claude:` model selector.
+
+    The claude branch is the pre-selector argv byte for byte; the pi branch is one
+    one-shot print run, its prefix file replacing the default system prompt.
+    """
+    vendor, _, name = model.partition(':')
+    if not name:
+        raise ValueError('tags model must be pi:<provider/model> or claude:<model>')
+    if vendor == 'pi':
+        # pi sends the path text when the file is missing; claude's flag fails instead.
+        if not prefix.is_file():
+            raise ValueError('tags system prompt is missing; refusing to launch pi')
+        return [
+            'pi',
+            '-p',
+            '--mode',
+            'json',
+            '--model',
+            name,
+            '--thinking',
+            pi_launch.THINKING['medium'],
+            '--no-tools',
+            '--no-mcp',
+            '--no-skills',
+            '--no-context-files',
+            '--no-prompt-templates',
+            '--no-extensions',
+            '--no-session',
+            '--system-prompt',
+            str(prefix),
+        ]
+    if vendor == 'claude':
+        return [
+            'claude',
+            '-p',
+            '--model',
+            name,
+            '--effort',
+            'high',
+            '--output-format',
+            'json',
+            '--system-prompt-file',
+            str(prefix),
+            '--tools',
+            '',
+            '--strict-mcp-config',
+            '--mcp-config',
+            '{"mcpServers":{}}',
+            '--disable-slash-commands',
+            '--no-session-persistence',
+            '--setting-sources',
+            '',
+            '--safe-mode',
+        ]
+    raise ValueError('tags model must be pi:<provider/model> or claude:<model>')
+
+
+def call_env(vendor):
+    if vendor == 'pi':
+        return dict(os.environ)
+    return {**os.environ, 'CLAUDE_CODE_MAX_OUTPUT_TOKENS': '32000', 'CLAUDE_CODE_PROMPT_CACHE_TTL': '5m'}
+
+
+def reply(vendor, stdout):
+    """(usage, cost_usd, value to validate, error text) from either vendor's stdout.
+
+    pi writes JSONL and has no aggregate envelope: every `turn_end` carries one
+    call's camelCase usage and cost, and the last assistant text is the reply.
+    Its error text is non-empty when the call failed: a last turn that ended in a
+    provider error carries that turn's `errorMessage` on one bounded line, so it is
+    never mistaken for a malformed batch and retried.
+    claude writes one JSON envelope with aggregate usage and total_cost_usd, and its
+    fourth value is that envelope's `is_error` flag.
+    """
+    if vendor == 'pi':
+        usage, cost, value, aborted, last = {}, 0.0, None, False, None
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get('type') == 'agent_settled':
+                # pi's own success signal: settled without an abort.
+                aborted = aborted or bool(event.get('aborted'))
+            if event.get('type') != 'turn_end':
+                continue
+            message = event.get('message') or {}
+            last = message
+            totals = message.get('usage') or {}
+            for key, field in pi_launch.USAGE.items():
+                usage[field] = usage.get(field, 0) + (totals.get(key) or 0)
+            cost += (totals.get('cost') or {}).get('total') or 0
+            text = ''.join(
+                block.get('text') or ''
+                for block in message.get('content') or []
+                if block.get('type') == 'text'
+            )
+            if text:
+                value = text
+        if aborted:
+            return usage, cost, value, 'aborted'
+        if last and last.get('stopReason') in pi_launch.PROVIDER_STOP:
+            error = last.get('errorMessage') or 'provider error'
+            return usage, cost, value, ' '.join(str(error).split())[:200]
+        return usage, cost, value, None
+    try:
+        envelope = json.loads(stdout)
+    except ValueError:
+        envelope = {}
+    return (
+        envelope.get('usage', {}),
+        envelope.get('total_cost_usd', 0),
+        envelope.get('structured_output') or envelope.get('result'),
+        bool(envelope.get('is_error')),
+    )
+
+
+def haiku(run, units, cards, model=DEFAULT_MODEL):
+    vendor, _, _ = model.partition(':')
     prefix = run / 'tags-system.md'
     save(prefix, CONTRACT + json.dumps(cards, ensure_ascii=False))
+    args, env = call_argv(model, prefix), call_env(vendor)
     projects, rows, calls = {c['id'] for c in cards}, [], []
     project_names = {}
     for card in cards:
@@ -460,57 +600,35 @@ def haiku(run, units, cards):
             stem = run / f'captures/tags-{n // 25 + 1}-{attempt}'
             start = time.monotonic()
             p = subprocess.run(
-                [
-                    'claude',
-                    '-p',
-                    '--model',
-                    MODEL,
-                    '--effort',
-                    'high',
-                    '--output-format',
-                    'json',
-                    '--system-prompt-file',
-                    str(prefix),
-                    '--tools',
-                    '',
-                    '--strict-mcp-config',
-                    '--mcp-config',
-                    '{"mcpServers":{}}',
-                    '--disable-slash-commands',
-                    '--no-session-persistence',
-                    '--setting-sources',
-                    '',
-                    '--safe-mode',
-                ],
+                args,
                 input=prompt,
                 text=True,
                 capture_output=True,
                 cwd=run,
                 timeout=600,
-                env={**os.environ, 'CLAUDE_CODE_MAX_OUTPUT_TOKENS': '32000'},
+                env=env,
             )
             seconds = time.monotonic() - start
             save(stem.with_suffix('.stdout.json'), p.stdout)
             save(stem.with_suffix('.stderr.txt'), p.stderr)
-            try:
-                envelope = json.loads(p.stdout)
-            except ValueError:
-                envelope = {}
-            usage = envelope.get('usage', {})
+            usage, cost_usd, value, error = reply(vendor, p.stdout)
             call = {
                 'batch': n // 25 + 1,
                 'attempt': attempt,
                 'seconds': seconds,
                 'exit': p.returncode,
                 'usage': usage,
-                'cost_usd': envelope.get('total_cost_usd', 0),
+                'cost_usd': cost_usd,
             }
             calls.append(call)
             save_call_counts(run, calls)
-            if p.returncode or envelope.get('is_error'):
-                raise ValueError('Haiku call failed; inspect private tags captures')
+            if p.returncode or error:
+                # The failure is the call's, not the batch's: nothing here is retried.
+                raise ValueError(
+                    f'tags call failed ({model}){f": {error}" if isinstance(error, str) else ""}; '
+                    'inspect private tags captures'
+                )
             try:
-                value = envelope.get('structured_output') or envelope.get('result')
                 if isinstance(value, str):
                     value = value.strip()
                     if value.startswith('```'):
@@ -526,12 +644,15 @@ def haiku(run, units, cards):
                 call['malformed'] = True
                 save_call_counts(run, calls)
                 if attempt:
-                    raise ValueError('malformed Haiku batch twice; step stopped') from None
+                    raise ValueError(
+                        f'malformed tags batch twice ({model}); step stopped'
+                    ) from None
     return rows, calls
 
 
-def tag(run, selected, state, qmd, start):
-    cards, routes = cards_and_routes(state, qmd, start)
+def tag(run, selected, state, qmd, start, model=DEFAULT_MODEL):
+    refs_report = {}
+    cards, routes = cards_and_routes(state, qmd, start, refs_report)
     units, aliases = make_units(selected)
     pending, sticky = [], 0
     for unit in units:
@@ -547,7 +668,7 @@ def tag(run, selected, state, qmd, start):
             )
         else:
             pending.append(unit)
-    rows, calls = haiku(run, pending, cards) if pending and cards else ([], [])
+    rows, calls = haiku(run, pending, cards, model) if pending and cards else ([], [])
     scored = {r['id']: r for r in rows}
     for unit in pending:
         row = scored.get(
@@ -580,7 +701,7 @@ def tag(run, selected, state, qmd, start):
         )
     weighted = weighted_tokens(total)
     result = {
-        'model': MODEL,
+        'model': model,
         'cards': cards,
         'cards_chars': len(json.dumps(cards, ensure_ascii=False)),
         'calls': calls,
@@ -591,6 +712,7 @@ def tag(run, selected, state, qmd, start):
         'units': units,
         'aliases': aliases,
         'unit_counts': dict(Counter(u['kind'] for u in units)),
+        'refs': refs_report,
     }
     save(run / 'tags.json', result)
     return result

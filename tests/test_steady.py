@@ -71,6 +71,8 @@ class Steady(unittest.TestCase):
             'FAKE_MODE',
             'FAKE_FAIL_VERB',
             'FAKE_RCLONE_FAIL',
+            'FAKE_VENDOR',
+            'FAKE_SESSION_FOR',
         ):
             self.env.pop(key, None)
         self.executable(
@@ -132,10 +134,19 @@ if mode == 'empty':
     (run/'result.json').write_text(json.dumps({'state':'empty', 'commit':commit}))
     sys.exit(0)
 if mode == 'noadvance': sys.exit(0)
+vendor = os.environ.get('FAKE_VENDOR')
+sessions = {}
 for name in ('a', 'r1'):
-    (run/('agent-'+name+'.json')).write_text(json.dumps({
-        'session_id': str(uuid.uuid4()), 'pid': os.getpid(), 'state': 'proven',
-    }))
+    sessions[name] = str(uuid.uuid4())
+    receipt = {'session_id': sessions[name], 'pid': os.getpid(), 'state': 'proven'}
+    if vendor:
+        receipt['vendor'] = vendor
+    (run/('agent-'+name+'.json')).write_text(json.dumps(receipt))
+if vendor == 'pi':
+    (run/'sessions').mkdir()
+    for name in os.environ.get('FAKE_SESSION_FOR', '').split(','):
+        if name in sessions:
+            (run/'sessions'/('2026-11-09T03-43-11-318Z_'+sessions[name]+'.jsonl')).touch()
 d = run/'step.sqlite'
 draft.snapshot(path, d, run.name, arg('--since'), arg('--until'))
 with store.connect(d, True) as db:
@@ -243,10 +254,17 @@ commit = commit_draft(d, 'gsd-step-run:')
             run = Path(call[call.index('--run') + 1])
             for name in ('a', 'r1'):
                 receipt = json.loads((run / f'agent-{name}.json').read_text())
-                expected.append({
-                    'session': receipt['session_id'], 'agent': 'claude',
-                    'label': name, 'step': run.name,
-                })
+                link = {
+                    'session': receipt['session_id'],
+                    'agent': receipt.get('vendor') or 'claude',
+                    'label': name,
+                    'step': run.name,
+                }
+                if link['agent'] == 'pi':
+                    found = list((run / 'sessions').glob(f'*_{receipt["session_id"]}.jsonl'))
+                    if len(found) == 1:
+                        link['path'] = str(found[0].resolve())
+                expected.append(link)
         self.assertEqual(record['links'], expected)
 
     def cli(self, *args, **env):
@@ -290,9 +308,48 @@ commit = commit_draft(d, 'gsd-step-run:')
         for flag in ('--effort-a', '--effort-review'):
             self.assertEqual(step[step.index(flag) + 1], 'high')
         self.assertIn('--tags', step)
-        self.assertNotIn('--a', step)
         self.assertEqual(steady.cursor(self.db), result['until'])
         self.assert_session_links(result)
+
+    def test_pi_receipt_link_names_pi_and_its_own_session_file(self):
+        result = self.invoke(FAKE_VENDOR='pi', FAKE_SESSION_FOR='a,r1')
+        step = self.steps()[0]
+        run = Path(step[step.index('--run') + 1])
+        expected = []
+        for name in ('a', 'r1'):
+            receipt = json.loads((run / f'agent-{name}.json').read_text())
+            transcript = run / 'sessions' / f'2026-11-09T03-43-11-318Z_{receipt["session_id"]}.jsonl'
+            self.assertTrue(transcript.is_file())
+            expected.append({
+                'session': receipt['session_id'], 'agent': 'pi', 'label': name,
+                'step': run.name, 'path': str(transcript.resolve()),
+            })
+        self.assertEqual(result['links'], expected)
+
+    def test_pi_receipt_without_a_matching_session_file_has_no_path(self):
+        result = self.invoke(FAKE_VENDOR='pi', FAKE_SESSION_FOR='')
+        step = self.steps()[0]
+        run = Path(step[step.index('--run') + 1])
+        expected = []
+        for name in ('a', 'r1'):
+            receipt = json.loads((run / f'agent-{name}.json').read_text())
+            expected.append({
+                'session': receipt['session_id'], 'agent': 'pi', 'label': name,
+                'step': run.name,
+            })
+        self.assertEqual(result['links'], expected)
+        self.assertEqual(list((run / 'sessions').iterdir()), [])
+
+    def test_steady_defaults_a_on_pi_with_index(self):
+        self.invoke()
+        step = self.steps()[0]
+        self.assertEqual(step[step.index('--a') + 1], 'pi:opencode-go-min/deepseek-v4.1-flash')
+        self.assertEqual(step[step.index('--a-graph') + 1], 'index')
+        self.assertEqual(step[step.index('--review') + 1], 'claude-opus-5-5')
+        self.assertEqual(
+            step[step.index('--tags-model') + 1], 'pi:opencode-go-min/deepseek-v4.1-flash'
+        )
+        self.assertEqual(steady.DEFAULT_ARGS, step[1 : len(steady.DEFAULT_ARGS) + 1])
 
     def test_morning_checks_after_publish_once_per_day_and_measures_cost(self):
         config = self.home / '.config/gsd'

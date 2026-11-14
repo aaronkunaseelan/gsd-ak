@@ -317,12 +317,33 @@ all selected sources remain. Tags are a cheap model's guesses, wrong often enoug
 that each source must be judged on its text, never on its tags.'''
 
 
+INDEX_HINT = '''This is an index of the draft, not the sparse graph: the graph is large and grows every
+step. One line per record, project-grouped:
+`short-id · type · state · [next actor · assignee ·] last change · title`.
+Open the records the window touches before you propose:
+
+    gsd show <short id> <short id> …        # batch many ids in one call
+    gsd show --json <id>                    # full row, links and citations
+    gsd fields                              # field vocabularies
+    qmd get/grep/thread                     # the sources behind the window
+
+The sparse text is not in this packet either way; this index names what exists and its state.
+Read a record before you change it, and read the project of every item you touch: a project's
+current_state and next_action are the roll-up the window usually moves. A state and date here
+are the draft's values at the cut, not a claim about the sources.'''
+
+INDEX_ROLE = ('The graph view is an index, not the graph: open the records the window touches '
+              'with `gsd show ID` (batch ids) before you propose.')
+
 
 def packet(
     run, graph, window, slice_text, group=None, *, restate=False, proposer=None, tagged=False,
     scope='Scopes and relay order are filled after A; whole project groups, then meetings, then people.',
+    graph_mode='full', graph_index=None,
 ):
     role = (RESTATE_ROLE if restate else A_ROLE) if group is None else REVIEW_ROLE
+    if group is None and graph_mode == 'index':
+        role += '\n' + INDEX_ROLE
     if group is not None:
         role = role.format(group=group) + '\nScope:\n' + scope
     if restate and group is not None:
@@ -338,9 +359,13 @@ def packet(
         task = f"Review group {group}; decide every change in it; write notes-{group}.md."
     # Only trusted instructions belong in the appended system prompt. Graph
     # and source evidence remain user data, including through the review relay.
+    if graph_mode not in ('full', 'index'):
+        raise ValueError('graph mode must be full or index')
+    if graph_mode == 'index' and not graph_index:
+        raise ValueError('index graph mode needs the index render')
     blocks = [
         ('contract', contract() + ('\n' + TAG_CONTRACT if tagged else '')),
-        ('graph view', graph),
+        ('graph view', graph if graph_mode == 'full' else INDEX_HINT + '\n\n' + graph_index),
         ('sparse window', window),
         ('role', role),
         ('slice', slice_text),

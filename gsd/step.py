@@ -8,13 +8,40 @@ import re
 import signal
 from pathlib import Path
 import subprocess
+import time
 import uuid
 
-from . import db as store, read, draft, export, packets, tags, feed
+from . import db as store, read, draft, export, packets, tags, feed, pi_launch
 from .capture import capture
 from . import reflections
 
 CLAUDE = 'claude'
+
+# A failed session's classes, in the order they are decided. Each is matched only
+# against the CLI's own fields and these fixed phrases; the provider's and the
+# model's own words never leave `failure_cause()`, which can carry secrets.
+FAILURE_PHRASES = (
+    ('rate limit', ('rate limit', '429', 'too many requests')),
+    ('usage limit', ('usage limit', 'limit reached', 'credit balance')),
+    ('overloaded', ('overloaded', '529')),
+    ('auth', ('authentication', 'unauthorized', 'invalid api key', '401', '403')),
+    ('timeout', ('timed out', 'timeout')),
+    ('aborted', ('aborted', 'interrupted')),
+)
+# claude reports an HTTP status and a subtype of its own; neither is gsd's vocabulary.
+FAILURE_STATUS = {
+    429: 'rate limit',
+    529: 'overloaded',
+    503: 'overloaded',
+    401: 'auth',
+    403: 'auth',
+}
+FAILURE_SUBTYPE = {'error_max_budget_usd': 'usage limit'}
+TIMEOUT_EXIT = 124
+
+
+class SessionFailed(ValueError):
+    """A session that ended without success; its message is only the cause class."""
 
 
 def save(path, value):
@@ -81,29 +108,38 @@ def launch(
     effort = effort_a if name == 'a' or name.startswith('a-') else effort_review
     if effort not in ('low', 'medium', 'high'):
         raise ValueError('invalid effort')
+    vendor, model = pi_launch.split(model)
     receipt = {
         'session_id': session,
         'model': model,
+        'vendor': vendor,
         'state': 'starting',
         'read_only': read_only,
         'effort': effort,
         reflections.FIELD: '',
     }
     save(receipt_path, receipt)
-    args = [CLAUDE, '-p', '--model', model, '--effort', effort]
-    args += '--permission-mode bypassPermissions --output-format stream-json --verbose'.split()
-    args += ['--append-system-prompt-file', str(run / 'shared.md'), '--session-id', session]
-    args += ['--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']
-    args += ['--disable-slash-commands', '--tools', 'Bash,Read,Write,Edit']
-    if not read_only:
-        args += ['--json-schema', json.dumps(reflections.OUTPUT_SCHEMA)]
+    if vendor == 'pi':
+        # pi keeps its transcript in the run folder, beside claude's own local copy.
+        (run / 'sessions').mkdir(mode=0o700, exist_ok=True)
+        args = pi_launch.argv(run, model, session, effort)
+    else:
+        args = [CLAUDE, '-p', '--model', model, '--effort', effort]
+        args += '--permission-mode bypassPermissions --output-format stream-json --verbose'.split()
+        args += ['--append-system-prompt-file', str(run / 'shared.md'), '--session-id', session]
+        args += ['--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']
+        args += ['--disable-slash-commands', '--tools', 'Bash,Read,Write,Edit']
+        if not read_only:
+            args += ['--json-schema', json.dumps(reflections.OUTPUT_SCHEMA)]
     env = dict(
         os.environ,
         QMD_UNTIL=until,
+        QMD_NOT_ORIGIN='steward,gsd',
         GSD_DB=str(run / 'step.sqlite'),
         GSD_ACTOR=name,
         # Auto-memory is a channel outside the packet: R1 loaded what A wrote (FR review).
         CLAUDE_CODE_DISABLE_AUTO_MEMORY='1',
+        CLAUDE_CODE_PROMPT_CACHE_TTL='5m',
         PATH=str(store.ROOT / 'bin') + os.pathsep + os.environ.get('PATH', ''),
     )
     stream = run / 'captures' / f'{name}.stream.jsonl'
@@ -117,14 +153,26 @@ def launch(
             'Reply only READ. The following task is for a later production run.\n\n'
             + (run / f'prompt-{name}.md').read_text(),
         )
+    elif vendor == 'pi':
+        # pi has no structured output: its prompt says where its own words go.
+        with user.open('a') as prompt:
+            prompt.write(reflections.instruction(run, name))
     try:
+        started = time.monotonic()
         code = headless(run, name, args, user, env, receipt, timeout)
-        calls, result = usage(stream)
+        seconds = round((time.monotonic() - started) * 1000)
+        calls, result = usage(stream, exit_code=code, duration_ms=seconds)
         save(run / 'captures' / f'{name}.usage.json', calls)
         save(run / 'captures' / f'{name}.result.json', result)
         receipt[reflections.FIELD] = reflections.text(result or {})
+        if vendor == 'pi':
+            # Only pi's sidecar is its own words; claude's are the structured output.
+            receipt[reflections.FIELD] = receipt[reflections.FIELD] or reflections.sidecar(
+                run, name
+            )
         if code or not result or result.get('is_error') or result.get('subtype') != 'success':
-            raise ValueError('session did not finish successfully')
+            cause = failure_cause(code, result, stream.read_text())
+            raise SessionFailed(f'session {name} did not finish successfully: {cause}')
         if read_only:
             if not calls or any(c['tool_use'] for c in calls):
                 raise ValueError('read-only proof used tools or produced no usage')
@@ -134,6 +182,10 @@ def launch(
     except (KeyboardInterrupt, SystemExit):
         receipt['state'] = 'interrupted'
         raise
+    except SessionFailed as failure:
+        # We wrote every word of this message; a provider's never comes through here.
+        receipt['state'] = 'failed'
+        raise ValueError(f'{failure}; inspect private captures, do not retry blindly') from None
     except Exception:
         receipt['state'] = 'failed'
         raise ValueError(
@@ -203,10 +255,17 @@ def private_file(path):
     return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w')
 
 
-def usage(stream):
-    """Assistant blocks can repeat an API message id; retain one usage row per call."""
+def usage(stream, *, exit_code=None, duration_ms=None):
+    """One usage row per API call, from either vendor's stream.
+
+    Claude's assistant blocks can repeat an API message id; pi's turn_end repeats
+    a responseId. Both keep one row per call.
+    """
+    text = stream.read_text()
+    if pi_launch.is_pi(text):
+        return pi_launch.parse(text, exit_code=exit_code, duration_ms=duration_ms)
     calls, result = {}, None
-    for line in stream.read_text().splitlines():
+    for line in text.splitlines():
         event = json.loads(line)
         if event.get('type') == 'assistant':
             message = event['message']
@@ -242,6 +301,50 @@ def usage(stream):
         for call, iteration in zip(calls, messages):
             call['usage'].update({k: v for k, v in iteration.items() if k != 'type'})
     return calls, result
+
+
+def failure_cause(code, result, stream_text):
+    """The class of a session that did not finish: one fixed phrase, never its words.
+
+    `result` is the envelope `usage()` returned (claude's result event, or pi's
+    derived one); `stream_text` is the raw stream, where claude's error events and
+    pi's `agent_settled` and `errorMessage` live. Only the class leaves this
+    function, because provider, model and source text can carry secrets.
+    """
+    result = result or {}
+    texts, aborted = [result.get(key) for key in ('result', 'error', 'errors')], False
+    for line in stream_text.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get('type') == 'agent_settled':
+            aborted = aborted or bool(event.get('aborted'))
+        if event.get('errorMessage'):
+            texts.append(event['errorMessage'])
+        if event.get('type') in ('result', 'error'):
+            texts += [event.get('result'), event.get('error')]
+        elif event.get('type') == 'assistant':
+            texts.append((event.get('message') or {}).get('error'))
+    status = result.get('api_error_status')
+    status = int(status) if isinstance(status, (int, str)) and str(status).isdigit() else None
+    if status in FAILURE_STATUS:
+        return FAILURE_STATUS[status]
+    if result.get('subtype') in FAILURE_SUBTYPE:
+        return FAILURE_SUBTYPE[result['subtype']]
+    if aborted:
+        return 'aborted'
+    if not result:
+        return 'no result'
+    text = ' '.join(str(t) for t in texts if t).lower()
+    for cause, phrases in FAILURE_PHRASES:
+        if any(phrase in text for phrase in phrases):
+            return cause
+    if code:
+        return 'timeout' if code == TIMEOUT_EXIT else f'exit {code}'
+    return 'error'
 
 
 def previous_folder(db):
@@ -382,8 +485,6 @@ def run(a):
         raise ValueError('--since must be earlier than --until')
     if not a.dry and not a.explicit_db:
         raise ValueError('non-dry step requires explicit --db FILE (live default not enabled yet)')
-    if a.a != a.review:
-        raise ValueError('--a and --review must use the same model for shared-prefix caching')
     step_id = until[:19].replace(':', '').replace('-', '') + '-' + uuid.uuid4().hex[:8]
     run = Path(a.run).expanduser().resolve() if a.run else store.LIVE.parent / 'steps' / step_id
     run.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -512,6 +613,7 @@ def prepare(a, run, step_id, since, until, select):
     draft.snapshot(a.db, draft_path, step_id, since, until)
     with store.connect(a.db) as base:
         graph = read.view(base, sparse=True)
+        graph_index = read.index(base)
         people = '\n'.join(
             f"{p['id']} · {p['display_name']} · {p.get('primary_email') or '-'} · aliases={p.get('aliases') or '[]'} · {p.get('role_title') or '-'}"
             for p in store.rows(base, 'people')
@@ -528,7 +630,15 @@ def prepare(a, run, step_id, since, until, select):
                 )
             selected['views']['prev-step.md'] = export.carry(previous)
         formats = read.fields_text(read.fields(base))
-        tag_data = tags.tag(run, selected, read.graph(base), qmd, since) if tagged else None
+        tag_data = (
+            tags.tag(
+                run, selected, read.graph(base), qmd, since,
+                getattr(a, 'tags_model', tags.DEFAULT_MODEL),
+            )
+            if tagged
+            else None
+        )
+    graph_mode = getattr(a, 'graph_mode', 'full')
     if tagged:
         grouped, group_sizes = tags.grouped(tag_data)
         # Replace only source views. Directory, carry-over and formats are unchanged.
@@ -581,11 +691,21 @@ def prepare(a, run, step_id, since, until, select):
                 common_slice + '\n' + agent['task'],
                 restate=True,
                 proposer=agent['name'],
+                graph_mode=graph_mode,
+                graph_index=graph_index,
             )
             save_packet(run, agent['name'], text, sizes)
             agent_sizes[agent['name']] = sizes
     else:
-        text, sizes = packets.packet(run, graph, window, common_slice, tagged=tagged)
+        text, sizes = packets.packet(
+            run,
+            graph,
+            window,
+            common_slice,
+            tagged=tagged,
+            graph_mode=graph_mode,
+            graph_index=graph_index,
+        )
         save_packet(run, 'a', text, sizes)
         agent_sizes = {'a': sizes}
     from .groups import assign
@@ -611,6 +731,7 @@ def prepare(a, run, step_id, since, until, select):
         step_id=step_id,
         mode='restate' if restate else 'window',
         tagged=tagged,
+        graph_mode=graph_mode,
         effort_a=getattr(a, 'effort_a', 'medium'),
         agents=[agent['name'] for agent in agents] if restate else ['a'],
         run=str(run),

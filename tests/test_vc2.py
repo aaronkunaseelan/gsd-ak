@@ -87,6 +87,10 @@ class SafeCause(unittest.TestCase):
             (root / 'captures').mkdir()
             for stderr, expected in [('private earlier line\n2 ids not found\n',
                                       'QMD read failed (exit 3): 2 ids not found'),
+                                     ('qmd2: not found: "wa:x"\nqmd2: not found: "wa:y"\n',
+                                      'QMD read failed (exit 3): 2 ids not found'),
+                                     ('qmd2: not found: "wa:x"\n',
+                                      'QMD read failed (exit 3): 1 id not found'),
                                      ('PRIVATE TOKEN AND BODY', 'QMD read failed (exit 3): diagnostics suppressed')]:
                 with patch('gsd.step.subprocess.run', return_value=CompletedProcess('qmd', 3, '', stderr)):
                     with self.assertRaises(ValueError) as error:

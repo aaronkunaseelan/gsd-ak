@@ -17,6 +17,10 @@ from . import reflections
 
 CLAUDE = 'claude'
 
+# qmd2 reports each id it could not read on its own stderr line; the id is private,
+# so only the count of those lines may leave the capture.
+NOT_FOUND = re.compile(r'qmd2: not found: ".*"')
+
 # A failed session's classes, in the order they are decided. Each is matched only
 # against the CLI's own fields and these fixed phrases; the provider's and the
 # model's own words never leave `failure_cause()`, which can carry secrets.
@@ -76,8 +80,14 @@ class Qmd:
             # The final diagnostic is safe only if its whole grammar is known.
             lines = p.stderr.splitlines()
             last = lines[-1] if lines else ''
-            safe = re.fullmatch(r'\d+ ids? not found|qmd2: not found|qmd2: unavailable \([A-Za-z]+\)', last)
-            cause = last if safe else 'diagnostics suppressed'
+            if NOT_FOUND.fullmatch(last):
+                n = sum(1 for line in lines if NOT_FOUND.fullmatch(line))
+                cause = f'{n} id' + ('' if n == 1 else 's') + ' not found'
+            else:
+                safe = re.fullmatch(
+                    r'\d+ ids? not found|qmd2: not found|qmd2: unavailable \([A-Za-z]+\)', last
+                )
+                cause = last if safe else 'diagnostics suppressed'
             raise ValueError(f'QMD read failed (exit {p.returncode}): {cause}')
         result = json.loads(p.stdout) if p.stdout.strip() else None
         if '--materialise' in args and isinstance(result, dict):

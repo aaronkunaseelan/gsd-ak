@@ -35,7 +35,7 @@ class Qmd:
         self.pages = iter(pages)
         self.calls = []
 
-    def __call__(self, *args):
+    def __call__(self, *args, missing_ok=False):
         self.calls.append(args)
         return next(self.pages)
 
@@ -188,18 +188,40 @@ class FeedTests(unittest.TestCase):
     def test_missing_primary_document_fails_without_checkpoint(self):
         from test_selection import FakeQmd
         class Missing(FakeQmd):
-            def __call__(self, *args):
+            def __call__(self, *args, missing_ok=False):
                 if args[0] == 'get':
                     return {'id': args[1], 'docs': []}
-                return super().__call__(*args)
+                return super().__call__(*args, missing_ok=missing_ok)
         for source in ('gmail', 'whatsapp', 'fathom'):
             with self.subTest(source=source):
                 qmd = Missing({source: [{'id': source + ':missing', 'time': CUT}]}, {}, {})
-                with self.assertRaisesRegex(ValueError, 'missing primary document'):
+                with self.assertRaisesRegex(ValueError, 'missing primary document') as error:
                     selection.select(qmd, CUT, UNTIL)
+                self.assertEqual(str(error.exception), 'missing primary document: 1 id')
+                self.assertNotIn(source + ':missing', str(error.exception))  # ids are private
                 self.assertEqual(self.state(), ({}, {}))
                 qmd = Missing({source: [{'id': source + ':gone', 'time': CUT, 'tombstone': True}]}, {}, {})
                 self.assertEqual(selection.select(qmd, CUT, UNTIL)['docs'], {})
+
+    def test_document_missing_for_a_moment_is_re_get_once_after_a_wait(self):
+        class Briefly:
+            def __init__(self):
+                self.gets = []
+
+            def __call__(self, *args, missing_ok=False):
+                batch = list(args[1 : args.index('--no-quoted')])
+                self.gets.append((batch, missing_ok))
+                if len(self.gets) == 1:
+                    batch = batch[1:]  # qmd re-decoding the source cannot serve the first id yet
+                return [{'id': i, 'docs': [{'id': i}]} for i in batch]
+
+        qmd, docs = Briefly(), {}
+        constant = patch.object(selection, 'FETCH_RETRY_S', 0)
+        with constant, patch.object(selection.time, 'sleep') as sleep:
+            selection.fetch(qmd, ['gmail:a', 'gmail:b', 'gmail:a'], docs)
+        self.assertEqual(sorted(docs), ['gmail:a', 'gmail:b'])
+        self.assertEqual(qmd.gets, [(['gmail:a', 'gmail:b'], True), (['gmail:a'], True)])
+        self.assertEqual(sleep.call_args.args, (0,))
 
     def test_contract_mismatch_is_failure_and_no_checkpoint(self):
         bad = page([item()])

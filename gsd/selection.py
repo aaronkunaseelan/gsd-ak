@@ -6,6 +6,7 @@ Only extras paths are opened locally, as written minutes rather than recordings.
 
 import hashlib
 import re
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from email.utils import getaddresses, parseaddr
@@ -52,6 +53,7 @@ MARKERS = set(MEDIA.values()) | {'[attachment]'}
 MAIL_CHARS, WA_CHARS, PERSON_CHATS = 280, 160, 6
 BATCH = 40
 GET_ARGS = ('--no-quoted', '--attachments', 'head:6', '--json')
+FETCH_RETRY_S = 60  # a qmd re-decode (reset-source) can hide a doc for a moment
 OWN_SKIP = {'header', 'quoted', 'attachment', 'binary'}  # parts that are not the author's own text
 EXTRA_LABEL = 'written minutes (not a recording)'
 PEOPLE_NOTE = (
@@ -292,14 +294,24 @@ def source_counts(scanned, rows, kind):
 
 def fetch(qmd, ids, docs):
     ids = list(dict.fromkeys(ids))
-    for i in range(0, len(ids), BATCH):
-        res = qmd('get', *ids[i : i + BATCH], *GET_ARGS)
-        for item in [res] if isinstance(res, dict) else res:
+
+    def get(batch):
+        res = qmd('get', *batch, *GET_ARGS, missing_ok=True)
+        for item in [res] if isinstance(res, dict) else res or []:
             for doc in item.get('docs') or []:
                 docs[doc['id']] = doc
+
+    for i in range(0, len(ids), BATCH):
+        get(ids[i : i + BATCH])
     missing = [ref for ref in ids if not docs.get(ref)]
     if missing:
-        raise ValueError('missing primary document: ' + ', '.join(missing))
+        time.sleep(FETCH_RETRY_S)
+        for i in range(0, len(missing), BATCH):
+            get(missing[i : i + BATCH])
+        missing = [ref for ref in missing if not docs.get(ref)]
+    if missing:
+        n = len(missing)  # ids are private: the count, never an id
+        raise ValueError(f'missing primary document: {n} id' + ('' if n == 1 else 's'))
 
 
 def meetings(qmd, feed, until, docs, extras):

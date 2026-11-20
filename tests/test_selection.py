@@ -17,7 +17,7 @@ class FakeQmd:
         self.sources, self.docs, self.rendered = sources, docs, rendered
         self.calls = []
 
-    def __call__(self, *args):
+    def __call__(self, *args, missing_ok=False):
         self.calls.append(args)
         if args[0] == 'feed':
             from datetime import datetime

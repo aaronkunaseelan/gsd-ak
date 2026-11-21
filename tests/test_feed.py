@@ -1,6 +1,7 @@
 """D27: synthetic arrivals, real scratch drafts and atomic commits."""
 
 import os
+from datetime import datetime
 from pathlib import Path
 import sqlite3
 import sys
@@ -16,9 +17,13 @@ CUT = '2026-10-19T00:00:00Z'
 UNTIL = '2026-10-20T00:00:00Z'
 
 
+def epoch(stamp):
+    return datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
+
+
 def item(token='one', **changes):
     return dict(token=token, id='gmail:synthetic', item='gmail:synthetic', source='gmail',
-                kind='email', time=1, arrived=1792368001, title=None,
+                kind='email', time=int(epoch(CUT)) + 3600, arrived=1792368001, title=None,
                 **{'from': None}, thread=None, chat=None, version='v1',
                 tombstone=False, reparse=False) | changes
 
@@ -64,7 +69,7 @@ class FeedTests(unittest.TestCase):
 
     def test_late_old_time_selected_then_committed_and_restart_dedupes(self):
         from test_selection import FakeQmd, doc, render
-        old = '2026-01-01T00:00:00Z'
+        old = '2026-10-18T00:00:00Z'
         qmd = FakeQmd({'gmail': [{'id': 'gmail:synthetic', 'time': old}]},
                       {'gmail:synthetic': doc('gmail:synthetic', 'pat@example.org', [('body', 'Pat: report')])},
                       {'gmail:synthetic': render()})
@@ -92,7 +97,7 @@ class FeedTests(unittest.TestCase):
         original = feed.Feed(Qmd([page([item('1')])]), CUT, UNTIL)
         original.rows('gmail')
         draft.commit(self.attach(original.state), self.target)
-        old = '2026-01-01T00:00:00Z'
+        old = '2026-10-18T00:00:00Z'
         qmd = FakeQmd({'gmail': [
             {'id': 'gmail:synthetic', 'time': old, 'version': 'v1'},
             {'id': 'gmail:synthetic', 'time': old, 'version': 'v2', 'reparse': True},
@@ -169,6 +174,53 @@ class FeedTests(unittest.TestCase):
         f = feed.Feed(Qmd([page([item('1', id='gmail:a', item='gmail:a'), item('2', id='gmail:b', item='gmail:b'),
                                  item('3', id='gmail:a', item='gmail:a', tombstone=True)])]), CUT, UNTIL)
         self.assertEqual([r['id'] for r in f.rows('gmail')], ['gmail:b'])
+        self.assertEqual(f.counts['gmail']['skipped_tombstone'], 1)
+        self.assertEqual(f.counts['gmail']['withdrawn_by_tombstone'], 1)
+
+    def test_stale_arrival_replay_is_skipped_counted_and_passed(self):
+        # F-161: a qmd reset-source re-emits history as plain arrivals with a new arrival and an
+        # old time; a row older than the window start by more than the bound is a replay.
+        from test_selection import FakeQmd, doc, render
+        qmd = FakeQmd({'gmail': [{'id': 'gmail:fresh', 'time': '2026-10-18T00:00:00Z'},
+                                 {'id': 'gmail:replay', 'time': '2026-09-19T00:00:00Z'}]},
+                      {'gmail:fresh': doc('gmail:fresh', 'pat@example.org', [('body', 'Pat: report')])},
+                      {'gmail:fresh': render()})
+        selected = selection.select(qmd, CUT, UNTIL)
+        self.assertEqual(set(selected['docs']), {'gmail:fresh'})
+        self.assertEqual(selected['manifest']['mail']['skipped_stale_arrival'], 1)
+        self.assertEqual(selected['feed']['positions']['gmail'], '2')  # past the replay too
+        gets = [call for call in qmd.calls if call[0] == 'get']
+        self.assertEqual(len(gets), 1)
+        self.assertNotIn('gmail:replay', gets[0])
+
+    def test_stale_bound_is_the_window_start_not_the_source_bootstrap(self):
+        # F-166: a bootstrap is a source's first-ever arrival and is kept forever by design.
+        # Bounding staleness by it let a reset replay of weeks of history in: run 1f40d32c
+        # carried 7,814 WhatsApp messages dated 13 October in a window opened 19 November.
+        bootstrap = '2026-09-09T00:00:00Z'  # 40 days before CUT
+        q = Qmd([page([item('old', id='gmail:old', item='gmail:old', time=int(epoch(CUT)) - 30 * 86400),
+                       item('late', id='gmail:late', item='gmail:late', time=int(epoch(CUT)) - 3 * 86400)])])
+        q.feed_bootstraps = {'gmail': bootstrap}
+        q.feed_since = CUT
+        f = feed.Feed(q, CUT, UNTIL)
+        self.assertEqual([r['token'] for r in f.rows('gmail')], ['late'])
+        self.assertEqual(f.counts['gmail']['skipped_stale_arrival'], 1)
+        self.assertEqual(q.calls[0][-2:], ('--since-arrival', bootstrap))
+        self.assertEqual(f.state['bootstraps']['gmail'], bootstrap)
+
+    def test_arrival_a_few_days_before_the_window_is_still_input(self):
+        late = int(epoch(CUT)) - 3 * 86400
+        f = feed.Feed(Qmd([page([item('late', time=late)])]), CUT, UNTIL)
+        self.assertEqual([r['token'] for r in f.rows('gmail')], ['late'])
+        self.assertEqual(f.counts['gmail']['skipped_stale_arrival'], 0)
+
+    def test_stale_tombstone_still_withdraws_an_earlier_fresh_arrival(self):
+        stale = int(epoch(CUT)) - 30 * 86400
+        f = feed.Feed(Qmd([page([item('1', id='gmail:a', item='gmail:a'),
+                                 item('2', id='gmail:b', item='gmail:b'),
+                                 item('3', id='gmail:a', item='gmail:a', tombstone=True, time=stale)])]), CUT, UNTIL)
+        self.assertEqual([r['id'] for r in f.rows('gmail')], ['gmail:b'])
+        self.assertEqual(f.counts['gmail']['skipped_stale_arrival'], 0)
         self.assertEqual(f.counts['gmail']['skipped_tombstone'], 1)
         self.assertEqual(f.counts['gmail']['withdrawn_by_tombstone'], 1)
 

@@ -6,6 +6,10 @@ from datetime import datetime, timezone
 from . import db as store
 from .contract_validate import problems
 
+# A qmd source reset re-emits old items as plain arrivals; an item older than the
+# window start (the last committed cut) by more than this is a replay, not a
+# late-published arrival.
+STALE_ARRIVAL_DAYS = 7
 CONTRACT = json.loads((store.ROOT / 'contracts/vendor/qmd.feed.v1.json').read_text())
 SQL = """
 CREATE TABLE IF NOT EXISTS feed_positions (
@@ -42,6 +46,10 @@ class Feed:
         token = self.starts.get(source)
         self.state['starts'][source] = token
         since = self.bootstraps.get(source, self.since)
+        # The bound is measured from the window start, not from `since`: a source's
+        # bootstrap is its original enumeration point and is kept forever, so a reset
+        # replay would otherwise be bounded at the source's first arrival ever.
+        stale_before = datetime.fromisoformat(store.iso(self.since)).timestamp() - STALE_ARRIVAL_DAYS * 86400
         # An invisible first entry has no predecessor token. Keep the original
         # bootstrap bound even if this empty commit advances the currency cut.
         self.state['bootstraps'][source] = since
@@ -49,7 +57,7 @@ class Feed:
         counts = self.counts[source] = {
             'feed_rows': 0, 'skipped_reparse': 0,
             'skipped_tombstone': 0, 'skipped_duplicate_versions': 0,
-            'withdrawn_by_tombstone': 0,
+            'skipped_stale_arrival': 0, 'withdrawn_by_tombstone': 0,
         }
         while True:
             args = ['feed', '--source', source, '--limit', '100', '--json']
@@ -80,6 +88,9 @@ class Feed:
                     kept = [r for r in out if r['id'] != row['id']]
                     counts['withdrawn_by_tombstone'] += len(out) - len(kept)
                     out[:] = kept
+                    continue
+                if row['time'] is not None and row['time'] < stale_before:
+                    counts['skipped_stale_arrival'] += 1
                     continue
                 key = (source, row['id'], row['version'])
                 if key in self.seen:

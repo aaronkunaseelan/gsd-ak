@@ -17,6 +17,16 @@ Owner wording and provenance: control folder `docs/owner-decisions.md`, D35.
 Lives in: `packets.A_ROLE`, `packets.REVIEW_ROLE`, `reflections`, `step.launch`,
 `steady.tally`, and `contracts/vendor/steward.record.v1.json`.
 
+## D36. The stale-arrival bound is the window start, never the source bootstrap
+
+D34's bound is measured from the window start (the last committed cut), never
+from the source's original bootstrap: a bootstrap is kept forever by design, so
+on 20 November 2026 (run 1f40d32c) a bound taken from it let 7,814 replayed
+WhatsApp messages dated 13 October through a window that opened on 19 November.
+The bootstrap still starts `--since-arrival`, which is all it is for.
+
+Lives in: `feed.Feed.rows`, `feed.STALE_ARRIVAL_DAYS`.
+
 ## D1. A local SQLite store
 
 Keep the canonical graph in a private SQLite WAL store, outside code releases
@@ -327,6 +337,24 @@ the list changes. Mechanics the store enforces are named with the reason, not
 re-specified; its refusal messages say what to do.
 
 Lives in: `packets.PRINCIPLES`, printed by `gsd rules`.
+
+## D34. A replayed arrival is not a late arrival
+
+A qmd source reset (`qmd reindex --reset-source`) clears qmd's capture
+checkpoint and re-emits every stored item as a plain arrival: a new arrival
+time, the item's original time, no `reparse` flag. gsd's positions moved past
+them, so it read years of history as new input — on 20 November 2026 one steady
+window carried 377,744 WhatsApp ids dated 2022 to 2025 and could not finish. A
+feed row whose item time is more than `STALE_ARRIVAL_DAYS` before the window
+start of its source is therefore skipped and counted as
+`skipped_stale_arrival`; its token still advances, so the position moves past
+the replay and the next run is clean. The bound keeps D27's real case intact
+within one week: a document published days late is still considered, even when
+its item time precedes the window. A tombstone is not skipped by the bound,
+because it withdraws rather than adds.
+
+Lives in: `feed.STALE_ARRIVAL_DAYS`, counted as `skipped_stale_arrival` in the
+run manifest.
 
 ## Cross-system contracts
 

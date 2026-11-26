@@ -384,6 +384,10 @@ def run(path):
                     ('archive', lambda: draft.upload_archives(path)),
                     ('publish qmd', lambda: own_command(['publish', 'qmd', '--db', str(path)])),
                     ('backup', lambda: own_command(['backup', '--db', str(path)])),
+                    (
+                        'retention',
+                        lambda: own_command(['retention', '--db', str(path), '--json']),
+                    ),
                 ]
                 config = Path.home() / '.config/gsd'
                 if (config / 'notion.token').is_file() and (

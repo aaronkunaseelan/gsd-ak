@@ -91,7 +91,10 @@ Steady emits `steward.record.v1` receipts under the `steward.job.v1` protocol.
 `publish qmd` writes change history to qmd's spool as `gsd-events`; selection
 excludes that lane to prevent a feedback loop. `backup` creates and verifies a
 private SQLite snapshot, then uploads using `rclone copy --immutable --checksum`.
-It never copies a live WAL file.
+It never copies a live WAL file. Steady's last sink, `retention`, archives step
+folders older than `retention.KEEP_DAYS` days to `<backup_remote>steps/` (sha1
+read back) and keeps their manifest, changes, result, status and open log;
+verified local backups older than `retention.KEEP_DAYS` days are removed.
 
 `publish notion --check` plans without remote writes. Ordinary publishing renders
 all records, compares hashes, writes changed sections and properties, then sets

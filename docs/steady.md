@@ -35,7 +35,7 @@ one-shot command for compatibility, not a scheduler.
   pass**, including `until <= since`, empty steps, failed steps, and failed QMD
   status/cut reads. TERM skips finalisation and stops further sinks.
   In order: upload the local `archive/<step_id>.sqlite` directory, `gsd publish qmd`,
-  `gsd backup`, then `gsd publish notion` only if both
+  `gsd backup`, `gsd retention`, then `gsd publish notion` only if both
   `~/.config/gsd/notion.token` and `notion-check-reviewed` exist.
   Sinks are independent: each is attempted even if an earlier sink fails.
   There are no per-piece publication calls. Quiet invocations heal failed uploads

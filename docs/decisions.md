@@ -6,6 +6,31 @@ qualified where later decisions changed them; an experimental plan is not a
 promise of current behavior. The implementation and shipped contracts define
 the interface.
 
+## D37. Old step folders and verified local backups are pruned
+
+Nothing ever removed a step folder: by 25 November 2026 `~/.local/share/gsd/steps`
+held 9.6 GiB in 87 folders accumulated since 28 October, while a normal steady
+step is 45–90 MB. Most of it came from the qmd reset replay (D34): five steps of
+1.2–1.9 GiB, each carrying 22,000 `captures/qmd-NNNN.json`. Local backups were
+kept forever too, 595 MB of them, although each is already uploaded with
+`rclone copy --immutable --checksum`. A step whose folder and `manifest.json`
+are both older than `KEEP_DAYS` is therefore tarred with zstd into a scratch
+directory, copied with `--immutable` to `<backup_remote>steps/`, and only when
+the remote sha1 reads back equal is `archived.json` written and everything but
+the manifest, changes, result, status and open log deleted. The open log stays
+because a step can be the last committed one for longer than `KEEP_DAYS`, and
+the next step reads exactly that file as its carry-over. `gsd runs` then reports
+the folder as archived instead of measuring zero tokens, so a steady record's
+own counts stand. A local backup is removed only when its own sha1 equals the
+remote's; an unreadable or different remote hash keeps it and counts it. Fresh
+mtimes make a lock unnecessary: a running step is never old. At most `MAX_STEPS`
+steps move per call, so one steady run stays bounded and the next continues.
+
+Lives in: `retention.sweep` (`retention.KEEP_DAYS`, `retention.MAX_STEPS`,
+`retention.KEPT_IN_STEP`), `runs.measure` (the `archived` marker), the
+`retention` verb (`cli.guard_write` for its `--db` refusal), and `steady`'s sink
+list.
+
 ## D35. Short model reflections reach Steward
 
 The proposer and each reviewer may leave a short free-form reflection in the same

@@ -10,6 +10,7 @@ import sqlite3
 from pathlib import Path
 
 from . import db as store, export
+from .retention import ARCHIVED
 from .tokens import weighted_tokens
 
 DECISIONS = ('a_changes', 'r1_accepted', 'r1_amended', 'r1_rejected', 'r1_added')
@@ -21,7 +22,7 @@ def safe_cause(error):
     text = str(error)
     patterns = (
         r'QMD read failed \(exit \d+\): (?:\d+ ids? not found|qmd2: not found|qmd2: unavailable \([A-Za-z]+\)|diagnostics suppressed)',
-        r'(?:gsd (?:step|publish|backup)|rclone archive) failed \(exit \d+\)',
+        r'(?:gsd (?:step|publish|backup|retention)|rclone archive) failed \(exit \d+\)',
         r'steady (?:terminated|stopped) by TERM',
         r'qmd (?:status failed|status is not valid qmd\.status\.v1 JSON|status violates qmd\.status\.v1|status: alive is false|(?:gmail|whatsapp|fathom) fresh_through is unknown|fresh_through is outside the supported time range)',
         r'step (?:did not advance committed cursor|committed an unexpected window cut)',
@@ -33,7 +34,7 @@ def safe_cause(error):
     parts = []
     for part in text.split('; '):
         found = next((m.group() for p in patterns if (m := re.search(p, part))), None)
-        stages = [s for s in ('loop', 'archive', 'publish qmd', 'backup', 'publish notion')
+        stages = [s for s in ('loop', 'archive', 'publish qmd', 'backup', 'retention', 'publish notion')
                   if s + ':' in part]
         if found:
             found = found.replace('terminated by TERM', 'stopped by TERM')
@@ -108,6 +109,7 @@ def stage(run, names):
 
 def measure(run):
     run = Path(run)
+    archived = (run / ARCHIVED).is_file()
     manifest = load(run / 'manifest.json', {})
     result = {'missing': []}
     changes_path = run / 'changes.jsonl'
@@ -135,15 +137,20 @@ def measure(run):
                       r1_added=sum(not is_a(c) for c in changes),
                       a_undecided=sum(c.get('decision') is None for c in a),
                       a_held=sum(c.get('decision') == 'hold' for c in a))
-    names = {p.stem.removeprefix('agent-') for p in run.glob('agent-*.json')}
-    names.update(p.name.split('.')[0] for p in (run / 'captures').glob('*.result.json'))
-    for prefix, agents in (
-        ('a', sorted(n for n in names if n == 'a' or n.startswith('a-'))),
-        ('r1', sorted(n for n in names if re.fullmatch(r'r\d+', n) or n == 'review')),
-    ):
-        values, missing = stage(run, agents)
-        result.update({prefix + '_' + k: v for k, v in values.items()})
-        result['missing'].extend(missing)
+    if archived:
+        # retention.sweep moved the captures to the remote cold copy. Reported as
+        # missing, not measured as zero, so command keeps the record's own counts.
+        result['missing'].append('archived')
+    else:
+        names = {p.stem.removeprefix('agent-') for p in run.glob('agent-*.json')}
+        names.update(p.name.split('.')[0] for p in (run / 'captures').glob('*.result.json'))
+        for prefix, agents in (
+            ('a', sorted(n for n in names if n == 'a' or n.startswith('a-'))),
+            ('r1', sorted(n for n in names if re.fullmatch(r'r\d+', n) or n == 'review')),
+        ):
+            values, missing = stage(run, agents)
+            result.update({prefix + '_' + k: v for k, v in values.items()})
+            result['missing'].extend(missing)
     return result
 
 

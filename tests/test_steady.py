@@ -94,7 +94,7 @@ args = sys.argv[1:]
 with open(os.environ['FAKE_LOG'], 'a') as out:
     out.write(json.dumps(args)+'\\n')
 if args[0] != 'step':
-    if os.environ.get('FAKE_FAIL_VERB') == ' '.join(args[:2]):
+    if os.environ.get('FAKE_FAIL_VERB') in (' '.join(args[:2]), args[0]):
         print('PRIVATE PROVIDER DIAGNOSTIC', file=sys.stderr)
         sys.exit(9)
     if args[0] == 'backup':
@@ -302,8 +302,8 @@ commit = commit_draft(d, 'gsd-step-run:')
         self.assertEqual(result['notion'], 'skipped (missing notion.token, notion-check-reviewed)')
         self.assertEqual(result['counts']['tags_retries'], 0)
         self.assertGreaterEqual(result['minutes'], 0)
-        self.assertEqual(result['published'], ['archive', 'publish qmd', 'backup'])
-        self.assertEqual([c[0] for c in self.commands()], ['step', 'publish', 'backup'])
+        self.assertEqual(result['published'], ['archive', 'publish qmd', 'backup', 'retention'])
+        self.assertEqual([c[0] for c in self.commands()], ['step', 'publish', 'backup', 'retention'])
         step = self.steps()[0]
         for flag in ('--effort-a', '--effort-review'):
             self.assertEqual(step[step.index(flag) + 1], 'high')
@@ -387,6 +387,33 @@ commit = commit_draft(d, 'gsd-step-run:')
         self.assertEqual(set(result['fresh_through']), set(steady.SOURCES))
         self.assertLessEqual(steady.timestamp(result['until']).timestamp(), min(result['fresh_through'].values()))
 
+    def test_retention_is_the_sink_after_backup(self):
+        result = self.invoke()
+        self.assertEqual(
+            result['published'], ['archive', 'publish qmd', 'backup', 'retention']
+        )
+        calls = self.commands()
+        self.assertEqual([c[0] for c in calls], ['step', 'publish', 'backup', 'retention'])
+        self.assertEqual(
+            [c[1:] for c in calls if c[0] == 'retention'],
+            [['--db', str(self.db), '--json']],
+        )
+
+    def test_retention_failure_is_a_sink_error(self):
+        with (
+            self.assertRaisesRegex(ValueError, 'retention: gsd retention failed'),
+            patch.dict(os.environ, {**self.env, 'FAKE_FAIL_VERB': 'retention'}, clear=True),
+            patch.object(steady, 'datetime', Clock),
+            patch.object(steady, 'LAUNCHER', self.bin / 'gsd'),
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
+            steady.run(self.db)
+        record = json.loads(out.getvalue())
+        self.assertEqual(record['error'], 'retention: gsd retention failed (exit 9)')
+        self.assertEqual(problems(RECORD_CONTRACT, record), [])
+        self.assertEqual(record['published'], ['archive', 'publish qmd', 'backup'])
+        self.assertNotIn('PRIVATE', out.getvalue())
+
     def test_empty_behind_is_success_with_reason(self):
         self.set_status(whatsapp='2026-10-17T06:15Z')
         result = self.invoke()
@@ -395,8 +422,8 @@ commit = commit_draft(d, 'gsd-step-run:')
         self.assertEqual(result['steps'], 0)
         self.assertEqual(result['links'], [])
         self.assertEqual(steady.cursor(self.db), self.seed)
-        self.assertEqual([c[0] for c in self.commands()], ['publish', 'backup'])
-        self.assertEqual(result['published'], ['archive', 'publish qmd', 'backup'])
+        self.assertEqual([c[0] for c in self.commands()], ['publish', 'backup', 'retention'])
+        self.assertEqual(result['published'], ['archive', 'publish qmd', 'backup', 'retention'])
         self.set_cut('2026-10-17T18:20Z')
         self.set_status()
         self.assertIn('now minus 15 minutes', self.invoke()['empty_reason'])
@@ -440,8 +467,8 @@ commit = commit_draft(d, 'gsd-step-run:')
         self.assert_session_links(record)
         self.assertEqual(problems(RECORD_CONTRACT, record), [])
         self.assertEqual(steady.cursor(self.db), self.seed)
-        self.assertEqual([c[0] for c in self.commands()], ['step', 'publish', 'backup'])
-        self.assertEqual(record['published'], ['archive', 'publish qmd', 'backup'])
+        self.assertEqual([c[0] for c in self.commands()], ['step', 'publish', 'backup', 'retention'])
+        self.assertEqual(record['published'], ['archive', 'publish qmd', 'backup', 'retention'])
         old = self.steps()[0]
         abandoned = Path(old[old.index('--run') + 1])
         before = (abandoned / 'step.sqlite').read_bytes()
@@ -469,7 +496,7 @@ commit = commit_draft(d, 'gsd-step-run:')
         self.assertEqual(record['weighted_tokens'], 30114)
         self.assert_session_links(record)
         self.assertTrue(record['error'])
-        self.assertEqual(record['published'], ['publish qmd'])
+        self.assertEqual(record['published'], ['publish qmd', 'retention'])
         self.assertIn('rclone archive failed (exit 9)', record['error'])
         self.assertIn('archive:', record['error'])
         self.assertIn('backup:', record['error'])
@@ -494,7 +521,7 @@ commit = commit_draft(d, 'gsd-step-run:')
         result = self.invoke()
         self.assertEqual(result['steps'], 0)
         self.assertEqual(len(self.steps()), 1)
-        self.assertEqual(result['published'], ['archive', 'publish qmd', 'backup'])
+        self.assertEqual(result['published'], ['archive', 'publish qmd', 'backup', 'retention'])
         self.assertEqual(archives[0].read_bytes(), frozen)
         self.assertEqual((self.root / 'remote/steps' / archives[0].name).read_bytes(), frozen)
         for path in pending_backups:
@@ -514,7 +541,7 @@ commit = commit_draft(d, 'gsd-step-run:')
         ):
             steady.run(self.db)
         record = json.loads(out.getvalue())
-        self.assertEqual(record['published'], ['archive', 'backup', 'publish notion'])
+        self.assertEqual(record['published'], ['archive', 'backup', 'retention', 'publish notion'])
         self.assertEqual([c[:2] for c in self.commands() if c[0] == 'publish'],
                          [['publish', 'qmd'], ['publish', 'notion']])
         self.assertTrue(list((self.root / 'remote/backups').glob('gsd-*.sqlite')))
@@ -711,7 +738,7 @@ step.run(SimpleNamespace(since='2026-01-01T00:00:00Z', until='2026-01-02T00:00:0
         self.assertEqual(result['empty_reason'], 'no selected sources')
         self.assertEqual(result['links'], [])
         self.assertEqual(result['steps'], 1)
-        self.assertEqual(result['published'], ['archive', 'publish qmd', 'backup'])
+        self.assertEqual(result['published'], ['archive', 'publish qmd', 'backup', 'retention'])
         self.assertEqual(steady.cursor(self.db), result['until'])
         self.set_cut('2026-10-17T06:15Z')
         with (
@@ -737,7 +764,7 @@ step.run(SimpleNamespace(since='2026-01-01T00:00:00Z', until='2026-01-02T00:00:0
         self.assertIn('qmd.status.v1', result.stdout)
         self.assertEqual(steady.cursor(self.db), self.seed)
         record = json.loads(result.stdout.splitlines()[0])
-        self.assertEqual(record['published'], ['archive', 'publish qmd', 'backup'])
+        self.assertEqual(record['published'], ['archive', 'publish qmd', 'backup', 'retention'])
         self.assertTrue(list((self.root / 'remote/backups').glob('gsd-*.sqlite')))
 
     def test_status_environment_failures_have_reason_and_nonzero_exit(self):
@@ -763,7 +790,7 @@ step.run(SimpleNamespace(since='2026-01-01T00:00:00Z', until='2026-01-02T00:00:0
                 self.assertEqual(problems(RECORD_CONTRACT, record), [])
                 self.assertTrue(record['error'])
                 self.assertEqual(record['steps'], 0)
-                self.assertEqual(record['published'], ['archive', 'publish qmd', 'backup'])
+                self.assertEqual(record['published'], ['archive', 'publish qmd', 'backup', 'retention'])
                 self.assertEqual(len(self.steps()), 0)
 
     def test_records_jsonl_append_and_notion_gate(self):
@@ -783,7 +810,7 @@ step.run(SimpleNamespace(since='2026-01-01T00:00:00Z', until='2026-01-02T00:00:0
         self.assertEqual(json.loads(lines[0]), {'kind': 'unrelated'})
         self.assertEqual(len(lines), 2)
         self.assertEqual(result['reflections'], [])
-        self.assertEqual(result['published'], ['archive', 'publish qmd', 'backup', 'publish notion'])
+        self.assertEqual(result['published'], ['archive', 'publish qmd', 'backup', 'retention', 'publish notion'])
         self.assertEqual(result['notion'], 'published')
         self.assertEqual(
             set(result),
@@ -831,7 +858,7 @@ step.run(SimpleNamespace(since='2026-01-01T00:00:00Z', until='2026-01-02T00:00:0
                 self.assertEqual(problems(RECORD_CONTRACT, record), [])
                 self.assertEqual(steady.cursor(self.db), store.iso('2026-10-17T18:15Z'))
                 self.assertEqual(record['steps'], 1)
-                self.assertEqual(record['published'], ['archive', 'publish qmd', 'backup'])
+                self.assertEqual(record['published'], ['archive', 'publish qmd', 'backup', 'retention'])
                 self.assertTrue(record['error'])
                 self.assertNotIn('PRIVATE', out.getvalue())
 
@@ -853,7 +880,7 @@ step.run(SimpleNamespace(since='2026-01-01T00:00:00Z', until='2026-01-02T00:00:0
         self.assertEqual(record['error'], failed.stderr.splitlines()[-1])
         self.assertEqual(len((directory / 'records.jsonl').read_text().splitlines()), 1)
         self.assertFalse(self.commands())
-        self.assertEqual(json.loads(done.stdout)['published'], ['archive', 'publish qmd', 'backup'])
+        self.assertEqual(json.loads(done.stdout)['published'], ['archive', 'publish qmd', 'backup', 'retention'])
         self.assertEqual(json.loads((directory / 'records.jsonl').read_text())['published'], [])
 
     def test_override_arguments_and_reserved_bounds(self):

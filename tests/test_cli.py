@@ -188,6 +188,7 @@ class CLI(unittest.TestCase):
                 'archive-recover',
                 'publish',
                 'backup',
+                'retention',
                 'step',
                 'steady',
                 'runs',

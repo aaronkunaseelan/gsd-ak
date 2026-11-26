@@ -33,9 +33,14 @@ def sets(groups):
     return result
 
 
-def writable(a, path=None):
-    if path is None and not a.explicit_db:
+def guard_write(a):
+    if not a.explicit_db:
         raise ValueError('writes require --db FILE or GSD_DB; the live default is read-only')
+
+
+def writable(a, path=None):
+    if path is None:
+        guard_write(a)
     return store.connect(path or a.db, True)
 
 
@@ -181,6 +186,16 @@ def do_backup(a):
     return backup(a.db)
 
 
+def do_retention(a):
+    from .retention import sweep
+
+    # Pruning deletes local files, so it may never default to the live store;
+    # a dry run only reads and is safe without --db.
+    if not a.dry_run:
+        guard_write(a)
+    return sweep(Path(a.db).expanduser().resolve().parent, dry_run=a.dry_run)
+
+
 # Each arguments entry is (flag/positional names, argparse settings).
 # This table defines parsing, dispatch, help, examples and `verbs` output.
 VERBS = [
@@ -194,7 +209,7 @@ VERBS = [
     {
         'name': 'steady',
         'arguments': [(['--once'], {'action': 'store_true', 'required': True})],
-        'effect': 'One Steward run clipped to QMD fresh_through; finalise archive by step id, QMD, backup and gated Notion independently on every lock-held invocation, including quiet or failed runs. TERM skips finalisation.',
+        'effect': 'One Steward run clipped to QMD fresh_through; finalise archive by step id, QMD, backup, retention and gated Notion independently on every lock-held invocation, including quiet or failed runs. TERM skips finalisation.',
         'example': 'gsd steady --once',
         'handler': lambda a: __import__('gsd.steady', fromlist=['run']).run(a.db),
     },
@@ -317,6 +332,13 @@ VERBS = [
         'effect': 'VACUUM INTO private snapshot, verify, rclone copy --immutable --checksum to B2.',
         'example': 'gsd backup',
         'handler': do_backup,
+    },
+    {
+        'name': 'retention',
+        'arguments': [(['--dry-run'], {'action': 'store_true'})],
+        'effect': 'Archive step folders whose folder and manifest are both older than retention.KEEP_DAYS to <backup_remote>steps/ (sha1 read back), keeping their manifest, changes, result, status and open log, then remove old local backups the remote still has. --dry-run lists the candidates and runs nothing; anything else requires --db.',
+        'example': 'gsd retention --db ~/.local/share/gsd/gsd.sqlite --dry-run --json',
+        'handler': do_retention,
     },
     {
         'name': 'migrate',

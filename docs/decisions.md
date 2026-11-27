@@ -6,6 +6,23 @@ qualified where later decisions changed them; an experimental plan is not a
 promise of current behavior. The implementation and shipped contracts define
 the interface.
 
+## D38. A record created and tombstoned in one draft lands as nothing
+
+A draft is a window of source evidence, and the same window can both create a
+record and remove it: on 26 November 2026 (run fe8a1bf2) a mistyped project id
+was created and tombstoned by two accepted changes, and the citations written
+with the creation stayed. Commit then took the record's plan as a deletion while
+the citation plans still needed it current, refused the id, and because a feed
+draft rolls back as a whole, nothing from that 12 h window landed. A record the
+draft both creates and removes therefore contributes no plan at all, and a
+citation or link to a record the draft ends deleted is dropped rather than a
+reason to refuse its endpoint: evidence about something now gone is nothing to
+keep. Nothing else is excused — a record refused for another reason still
+refuses as before, and a feed draft still rolls back on any refusal.
+
+Lives in: `draft.drop_net_deletes`, called between `draft.prepare_plans` and
+`draft.preflight`.
+
 ## D37. Old step folders and verified local backups are pruned
 
 Nothing ever removed a step folder: by 25 November 2026 `~/.local/share/gsd/steps`

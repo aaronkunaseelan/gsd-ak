@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+import uuid
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -320,6 +321,98 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(self.state()[0], {'gmail': 'one'})
         with store.connect(self.target) as db:
             self.assertEqual(store.pipeline_cut(db)['until'], store.iso(UNTIL))
+
+    def feed_state(self):
+        f = feed.Feed(Qmd([page([item()])]), CUT, UNTIL)
+        f.rows('gmail')
+        return f.state
+
+    def seed(self, title):
+        payload = {'changes': [{'ops': [{'upsert': 'item', 'set': {'title': title}}]}]}
+        with store.connect(self.target, True) as db:
+            return write.batch(db, payload, 'owner')[0]['records'][0]
+
+    def test_record_created_and_tombstoned_in_one_draft_commits_as_nothing(self):
+        # run fe8a1bf2: a mistyped project id was created and tombstoned in one window, but its
+        # two citations kept the id looking required, and a whole 12 h source window rolled back.
+        new = str(uuid.uuid4())
+        lands = str(uuid.uuid4())
+        path = self.attach(self.feed_state())
+        with store.connect(path, True) as db:
+            written = write.batch(db, {'changes': [
+                {'id': 'a1', 'ops': [{'upsert': 'item', 'id': lands,
+                                      'set': {'title': 'Unrelated accepted work'},
+                                      'cite': [{'ref': 'gmail:unrelated'}]}]},
+                {'id': 'a2', 'ops': [{'upsert': 'project', 'id': new,
+                                      'set': {'name': 'Mistyped project'},
+                                      'cite': [{'ref': 'gmail:one'}, {'ref': 'wa:two'}]}]},
+                {'id': 'a3', 'ops': [{'link': [new, lands, 'relates_to']}]},
+                {'id': 'a23', 'ops': [{'tombstone': new}]},
+            ]}, 'a')
+            self.assertTrue(all(r['ok'] for r in written), written)
+            accepted = [{'id': c, 'decision': 'accept'} for c in ('a1', 'a2', 'a3', 'a23')]
+            self.assertTrue(all(r['ok'] for r in draft.decide(db, accepted, 'reviewer')))
+        landed = draft.commit(path, self.target, actor=store.PIPELINE_ACTOR)
+        self.assertEqual(landed['refused'], [])
+        self.assertEqual(landed['landed_changes'], ['a1'])
+        with store.connect(self.target) as db:
+            for table in ('records', 'projects', 'source_refs'):
+                column = 'id' if table != 'source_refs' else 'record_id'
+                query = f'SELECT count(*) FROM {table} WHERE {column}=?'
+                self.assertEqual(db.execute(query, (new,)).fetchone()[0], 0, table)
+            links = 'SELECT count(*) FROM record_links WHERE from_record_id=?'
+            self.assertEqual(db.execute(links, (new,)).fetchone()[0], 0)
+            self.assertEqual(
+                store.current(db, 'items', (lands,))['title'], 'Unrelated accepted work'
+            )
+            self.assertEqual(store.pipeline_cut(db)['until'], store.iso(UNTIL))
+
+    def test_citation_to_a_record_the_draft_deletes_is_not_added(self):
+        rid = self.seed('Existing item')
+        path = self.attach(self.feed_state())
+        with store.connect(path, True) as db:
+            written = write.batch(db, {'changes': [
+                {'id': 'a1', 'ops': [{'upsert': 'item', 'id': rid,
+                                      'set': {'body_markdown': 'draft note'},
+                                      'cite': [{'ref': 'gmail:one'}]}]},
+                {'id': 'a2', 'ops': [{'tombstone': rid}]},
+            ]}, 'a')
+            self.assertTrue(all(r['ok'] for r in written), written)
+            accepted = [{'id': c, 'decision': 'accept'} for c in ('a1', 'a2')]
+            self.assertTrue(all(r['ok'] for r in draft.decide(db, accepted, 'reviewer')))
+        landed = draft.commit(path, self.target, actor=store.PIPELINE_ACTOR)
+        self.assertEqual(landed['refused'], [])
+        with store.connect(self.target) as db:
+            self.assertIsNone(store.current(db, 'records', (rid,)))
+            self.assertIsNone(store.current(db, 'items', (rid,)))
+            cites = 'SELECT count(*) FROM source_refs WHERE record_id=?'
+            self.assertEqual(db.execute(cites, (rid,)).fetchone()[0], 0)
+
+    def test_tombstoning_a_record_moved_after_the_snapshot_still_rolls_the_window_back(self):
+        # Dropping citations to a net-deleted record never excuses a refusal for another reason.
+        rid = self.seed('Moved item')
+        path = self.attach(self.feed_state())
+        with store.connect(path, True) as db:
+            written = write.batch(db, {'changes': [
+                {'id': 'a1', 'ops': [{'upsert': 'item', 'id': rid,
+                                      'set': {'body_markdown': 'draft'},
+                                      'cite': [{'ref': 'gmail:one'}]}]},
+                {'id': 'a2', 'ops': [{'tombstone': rid}]},
+            ]}, 'a')
+            self.assertTrue(all(r['ok'] for r in written), written)
+            accepted = [{'id': c, 'decision': 'accept'} for c in ('a1', 'a2')]
+            self.assertTrue(all(r['ok'] for r in draft.decide(db, accepted, 'reviewer')))
+        with store.connect(self.target, True) as db:
+            moved = {'changes': [{'ops': [{'upsert': 'item', 'id': rid,
+                                           'set': {'body_markdown': 'target moved'}}]}]}
+            write.batch(db, moved, 'owner')
+        with self.assertRaises(write.Invalid) as error:
+            draft.commit(path, self.target, actor=store.PIPELINE_ACTOR)
+        self.assertIn('source window rolled back', str(error.exception.errors))
+        with store.connect(self.target) as db:
+            self.assertEqual(store.current(db, 'records', (rid,))['id'], rid)
+            self.assertEqual(store.current(db, 'items', (rid,))['body_markdown'], 'target moved')
+            self.assertEqual(store.pipeline_cut(db)['until'], CUT)
 
     def test_filtered_only_real_selection_commits_but_dry_does_not(self):
         from test_selection import FakeQmd, doc, render

@@ -337,6 +337,7 @@ def commit(draft_path, target, window_until=None, note=None, actor='owner'):
                 ).fetchone():
                     fail('step_id', meta['step_id'], 'step already committed to this target')
                 refused = prepare_plans(draft, live, plans, cutoff)
+                drop_net_deletes(live, plans)
                 preflight(live, plans, refused, cid, actor)
                 if refused and 'feed' in meta:
                     raise Invalid([err('commit', rid, 'source window rolled back: ' + why)
@@ -444,6 +445,37 @@ def prepare_plans(draft, live, plans, cutoff):
             data['source_ref_id'] = next_ref
         p.update(data=data, op=op)
     return refused
+
+
+def drop_net_deletes(live, plans):
+    """Drop what a draft ends up deleting before it can refuse itself.
+
+    A record created and tombstoned within one draft lands as nothing, and a
+    citation or link to a record the draft ends deleted is dropped rather than
+    a reason to refuse its endpoint (26 Nov 2026, run fe8a1bf2).
+    """
+    deleted = {
+        identity[0]
+        for (table, identity), p in plans.items()
+        if table == 'records' and p['op'] == 'delete'
+    }
+    for rid in sorted(deleted):
+        if not store.current(live, 'records', (rid,)):
+            for key in [k for k, p in plans.items() if p['records'] == {rid}]:
+                del plans[key]
+        for key in [
+            k
+            for k, p in plans.items()
+            if k[0] in ('source_refs', 'record_links')
+            and p['op'] == 'upsert'
+            and rid
+            in (
+                p['data'].get('record_id'),
+                p['data'].get('from_record_id'),
+                p['data'].get('to_record_id'),
+            )
+        ]:
+            del plans[key]
 
 
 def preflight(live, plans, refused, cid, actor):
